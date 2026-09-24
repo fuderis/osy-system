@@ -55,7 +55,7 @@ pub fn tools_list() -> Vec<Tool> {
             Schema::string("Action to perform.").variants(set![
                 "create".into(),
                 "remove".into(),
-                "list_users".into(),
+                "list".into(),
                 "add_ssh_key".into(),
                 "add_ssh_key_from_file".into(),
                 "generate_ssh_key".into(),
@@ -382,7 +382,6 @@ async fn upload_pubkey_to_vps(conn: &mut SshConnection, user: &str, pubkey: &str
 #[log()]
 pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
-    info!("Accepted request for host: `{host}`");
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
@@ -390,11 +389,11 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<(
                echo '\n=== CPU & RAM ===' && free -h && \
                echo '\n=== DISK USAGE ===' && df -h / && \
                echo '\n=== FAILED SERVICES ===' && (systemctl --failed --plain --no-legend 2>/dev/null || echo 'N/A')";
-
     let output = conn.exec(cmd).await?;
+
+    info!("Received system info for host: `{host}`.");
     tx.send(Event::Answer(output))?;
 
-    info!("Successfully completed request for host: {host}");
     Ok(())
 }
 
@@ -402,15 +401,11 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<(
 pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
     let identity = action.identity_file.as_deref();
-    info!(
-        "Accepted action `user.{}` for host: `{host}`",
-        action.action
-    );
 
     let mut conn = SshConnection::connect(&host, identity).await?;
 
     match action.action.as_str() {
-        "list_users" => {
+        "list" => {
             let cmd = "awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd";
             let output = conn.exec(cmd).await?;
             tx.send(Event::Answer(format!(
@@ -580,28 +575,21 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
 
             conn.exec(&cmd).await?;
             let status_str = if grant { "granted to" } else { "revoked from" };
-            tx.send(Event::Answer(format!(
-                "Sudo privileges {status_str} user `{user}`."
-            )))?;
+            let msg = format!("Sudo privileges {status_str} user `{user}`.");
+
+            info!("{msg}");
+            tx.send(Event::Answer(msg))?;
         }
 
-        _ => return Err(Error::Custom("Invalid user action".into()).into()),
+        _ => return Err(Error::Custom("Invalid user action.".into()).into()),
     }
 
-    info!(
-        "Successfully completed action `user.{}` for host: `{host}`",
-        action.action
-    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_tunnel(tx: Sender<Bytes>, action: InfraTunnelAction) -> Result<()> {
     let port = action.local_port;
-    info!(
-        "Accepted action `tunnel.{}` on port `{port}`.",
-        action.action
-    );
 
     let vps = resolve_host(action.vps_host.as_deref())?;
 
@@ -731,51 +719,44 @@ pub async fn handle_tunnel(tx: Sender<Bytes>, action: InfraTunnelAction) -> Resu
         }
         "stop" => {
             let mut tunnels = ACTIVE_TUNNELS.lock().unwrap();
-            if let Some(stop_tx) = tunnels.remove(&port) {
+
+            let msg = if let Some(stop_tx) = tunnels.remove(&port) {
                 let _ = stop_tx.send(());
                 info!("Signal sent to stop proxy listener on port `{port}`.");
-                tx.send(Event::Answer(format!(
-                    "Successfully stopped SOCKS5 proxy tunnel on port `{port}`."
-                )))?;
+                format!("Successfully stopped SOCKS5 proxy tunnel on port `{port}`.")
             } else {
                 warn!("Stop requested, but no active tunnel found registered on port `{port}`");
-                tx.send(Event::Answer(format!(
-                    "No active proxy tunnel found running on port `{port}`."
-                )))?;
-            }
+                format!("No active proxy tunnel found running on port `{port}`.")
+            };
+
+            info!("{msg}");
+            tx.send(Event::Answer(msg))?;
         }
         "status" => {
             let is_registered = ACTIVE_TUNNELS.lock().unwrap().contains_key(&port);
             let addr = format!("127.0.0.1:{port}");
             let is_port_bound = TcpListener::bind(&addr).await.is_err();
 
-            if is_registered || is_port_bound {
-                tx.send(Event::Answer(format!(
+            let msg = if is_registered || is_port_bound {
+                format!(
                     "Tunnel status for port `{port}`: **ACTIVE** (Port occupied by active SOCKS5 worker)"
-                )))?;
+                )
             } else {
-                tx.send(Event::Answer(format!(
-                    "No active proxy tunnel found listening on port `{port}`."
-                )))?;
-            }
+                format!("No active proxy tunnel found listening on port `{port}`.")
+            };
+
+            info!("{msg}");
+            tx.send(Event::Answer(msg))?;
         }
         _ => return Err(Error::Custom("Invalid tunnel action".into()).into()),
     }
 
-    info!(
-        "Successfully completed action `tunnel.{}` on port `{port}`.",
-        action.action
-    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
-    info!(
-        "Accepted transfer direction `{}` for host: `{host}`",
-        action.direction
-    );
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
@@ -827,20 +808,12 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> 
         _ => return Err(Error::Custom("Invalid direction. Use upload/download".into()).into()),
     }
 
-    info!(
-        "Successfully completed transfer direction `{}` for host: `{host}`",
-        action.direction
-    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
-    info!(
-        "Accepted sync for editor `{}` (`{}`) with host: `{host}`",
-        action.editor, action.direction
-    );
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
@@ -885,14 +858,12 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Re
         _ => return Err(Error::Custom("Invalid direction. Use push/pull".into()).into()),
     }
 
-    tx.send(Event::Answer(format!(
+    let msg = format!(
         "Successfully synchronized `{}` config (`{}`) with `{host}`.",
         action.editor, action.direction
-    )))?;
-
-    info!(
-        "Successfully completed sync for editor `{}` with host: `{host}`",
-        action.editor
     );
+    info!("{msg}");
+    tx.send(Event::Answer(msg))?;
+
     Ok(())
 }
