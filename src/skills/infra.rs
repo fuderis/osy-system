@@ -5,6 +5,7 @@ use atoman::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::oneshot,
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use russh::{
@@ -12,7 +13,16 @@ use russh::{
     keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
 use russh_keys::ssh_key::rand_core::OsRng;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
+};
+
+// Registry to keep track of active tunnel cancellation channels by local port
+static ACTIVE_TUNNELS: LazyLock<Mutex<HashMap<u16, oneshot::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // ============================================================================
 // TOOLS DEFINITION
@@ -305,7 +315,8 @@ fn resolve_identity_file(override_path: Option<&str>) -> Result<PathBuf> {
         if rsa.exists() {
             Ok(rsa)
         } else {
-            Ok(ed25519) // Возвращаем ed25519 по умолчанию для красивого текста ошибки загрузки
+            // Default to ed25519 to produce a clear error message on key load failure
+            Ok(ed25519)
         }
     }
 }
@@ -371,6 +382,8 @@ async fn upload_pubkey_to_vps(conn: &mut SshConnection, user: &str, pubkey: &str
 #[log()]
 pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
+    info!("Accepted request for host: `{host}`");
+
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
     let cmd = "echo '=== SYSTEM INFO ===' && (lsb_release -d 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME) && uptime && \
@@ -380,6 +393,8 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<(
 
     let output = conn.exec(cmd).await?;
     tx.send(Event::Answer(output))?;
+
+    info!("Successfully completed request for host: {host}");
     Ok(())
 }
 
@@ -387,6 +402,11 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<(
 pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
     let identity = action.identity_file.as_deref();
+    info!(
+        "Accepted action `user.{}` for host: `{host}`",
+        action.action
+    );
+
     let mut conn = SshConnection::connect(&host, identity).await?;
 
     match action.action.as_str() {
@@ -394,7 +414,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
             let cmd = "awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd";
             let output = conn.exec(cmd).await?;
             tx.send(Event::Answer(format!(
-                "Users on {host}:\n{}",
+                "Users on `{host}`:\n{}",
                 if output.trim().is_empty() {
                     "No regular users found.".to_string()
                 } else {
@@ -415,7 +435,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
             }
             conn.exec(&cmd).await?;
             tx.send(Event::Answer(format!(
-                "User '{user}' created successfully on {host}."
+                "User `{user}` created successfully on `{host}`."
             )))?;
         }
 
@@ -449,7 +469,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
 
                 conn.exec(&cleanup_cmd).await?;
                 tx.send(Event::Answer(format!(
-                    "Active sessions killed and user '{user}' removed successfully from {host}."
+                    "Active sessions killed and user `{user}` removed successfully from `{host}`."
                 )))?;
             } else {
                 tx.send(Event::Answer("User removal cancelled.".to_string()))?;
@@ -460,13 +480,13 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
             let user = action
                 .username
                 .as_deref()
-                .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
+                .ok_or_else(|| Error::Custom("Missing `username` parameter".into()))?;
             let pubkey = action
                 .pubkey
                 .ok_or_else(|| Error::Custom("Missing pubkey parameter".into()))?;
 
             upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
-            tx.send(Event::Answer(format!("SSH key added for user '{user}'.")))?;
+            tx.send(Event::Answer(format!("SSH key added for user `{user}`.")))?;
         }
 
         "add_ssh_key_from_file" => {
@@ -488,7 +508,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
 
             upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
             tx.send(Event::Answer(format!(
-                "SSH key from `{}` uploaded for user '{user}'.",
+                "SSH key from `{}` uploaded for user `{user}`.",
                 path.display()
             )))?;
         }
@@ -561,155 +581,202 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
             conn.exec(&cmd).await?;
             let status_str = if grant { "granted to" } else { "revoked from" };
             tx.send(Event::Answer(format!(
-                "Sudo privileges {status_str} user '{user}'."
+                "Sudo privileges {status_str} user `{user}`."
             )))?;
         }
 
         _ => return Err(Error::Custom("Invalid user action".into()).into()),
     }
 
+    info!(
+        "Successfully completed action `user.{}` for host: `{host}`",
+        action.action
+    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_tunnel(tx: Sender<Bytes>, action: InfraTunnelAction) -> Result<()> {
+    let port = action.local_port;
+    info!(
+        "Accepted action `tunnel.{}` on port `{port}`.",
+        action.action
+    );
+
     let vps = resolve_host(action.vps_host.as_deref())?;
 
     match action.action.as_str() {
         "start" => {
-            let addr = format!("127.0.0.1:{}", action.local_port);
+            let addr = format!("127.0.0.1:{port}");
             let listener = TcpListener::bind(&addr).await.map_err(|e| {
-                Error::Custom(format!(
-                    "Port {} is already in use or bind failed: {e}",
-                    action.local_port
-                ))
+                Error::Custom(format!("Port {port} is already in use or bind failed: {e}"))
             })?;
 
             let conn = SshConnection::connect(&vps, action.identity_file.as_deref()).await?;
             let session = Arc::new(conn.session);
 
-            // Запускаем асинхронный SOCKS5 прокси-сервер на чистом Rust
-            atoman::spawn(async move {
-                while let Ok((mut socket, _)) = listener.accept().await {
-                    let session_clone = Arc::clone(&session);
-                    atoman::spawn(async move {
-                        // Минимальный handshaking проксирования SOCKS5
-                        let mut buf = [0u8; 256];
-                        if socket.read_exact(&mut buf[..2]).await.is_err() {
-                            return;
-                        }
-                        let nmethods = buf[1] as usize;
-                        if socket.read_exact(&mut buf[..nmethods]).await.is_err() {
-                            return;
-                        }
-                        // NO AUTH
-                        if socket.write_all(&[0x05, 0x00]).await.is_err() {
-                            return;
-                        }
-
-                        // SOCKS Request
-                        if socket.read_exact(&mut buf[..4]).await.is_err() {
-                            return;
-                        }
-                        if buf[1] != 0x01 {
-                            return; // Support only CONNECT
-                        }
-
-                        let target_host = match buf[3] {
-                            0x01 => {
-                                // IPv4
-                                let mut ip = [0u8; 4];
-                                if socket.read_exact(&mut ip).await.is_err() {
-                                    return;
-                                }
-                                std::net::Ipv4Addr::from(ip).to_string()
-                            }
-                            0x03 => {
-                                // Domain
-                                let mut len = [0u8; 1];
-                                if socket.read_exact(&mut len).await.is_err() {
-                                    return;
-                                }
-                                let mut domain = vec![0u8; len[0] as usize];
-                                if socket.read_exact(&mut domain).await.is_err() {
-                                    return;
-                                }
-                                String::from_utf8_lossy(&domain).to_string()
-                            }
-                            _ => return,
-                        };
-
-                        let mut port_buf = [0u8; 2];
-                        if socket.read_exact(&mut port_buf).await.is_err() {
-                            return;
-                        }
-                        let target_port = u16::from_be_bytes(port_buf);
-
-                        // Открываем SSH Direct TCP/IP канал к целевому хосту
-                        if let Ok(channel) = session_clone
-                            .channel_open_direct_tcpip(
-                                &target_host,
-                                target_port as u32,
-                                "127.0.0.1",
-                                0,
-                            )
-                            .await
-                        {
-                            // Успешный ответ SOCKS5
-                            let _ = socket
-                                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                                .await;
-
-                            let (mut reader, mut writer) = socket.split();
-                            let mut channel_stream = channel.into_stream();
-
-                            let _ = atoman::io::copy_bidirectional(
-                                &mut channel_stream,
-                                &mut atoman::io::join(&mut reader, &mut writer),
-                            )
-                            .await;
-                        }
-                    });
+            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+            {
+                let mut tunnels = ACTIVE_TUNNELS.lock().unwrap();
+                if let Some(old_stop_tx) = tunnels.insert(port, stop_tx) {
+                    let _ = old_stop_tx.send(());
                 }
+            }
+
+            // spawn async SOCKS5 proxy server task with graceful cancellation support
+            atoman::spawn(async move {
+                loop {
+                    atoman::select! {
+                        _ = &mut stop_rx => {
+                            info!("Shutdown signal received. Stopping SOCKS5 proxy on port `{port}`...");
+                            break;
+                        }
+                        accept_res = listener.accept() => {
+                            let (mut socket, _) = match accept_res {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    error!("Failed to accept TCP connection on port `{port}`: {e}");
+                                    break;
+                                }
+                            };
+
+                            let session_clone = Arc::clone(&session);
+                            atoman::spawn(async move {
+                                // SOCKS5 proxy handshaking
+                                let mut buf = [0u8; 256];
+                                if socket.read_exact(&mut buf[..2]).await.is_err() {
+                                    return;
+                                }
+                                let nmethods = buf[1] as usize;
+                                if socket.read_exact(&mut buf[..nmethods]).await.is_err() {
+                                    return;
+                                }
+                                // NO AUTH response
+                                if socket.write_all(&[0x05, 0x00]).await.is_err() {
+                                    return;
+                                }
+
+                                // SOCKS Request
+                                if socket.read_exact(&mut buf[..4]).await.is_err() {
+                                    return;
+                                }
+                                if buf[1] != 0x01 {
+                                    return; // support only CONNECT
+                                }
+
+                                let target_host = match buf[3] {
+                                    0x01 => {
+                                        // IPv4
+                                        let mut ip = [0u8; 4];
+                                        if socket.read_exact(&mut ip).await.is_err() {
+                                            return;
+                                        }
+                                        std::net::Ipv4Addr::from(ip).to_string()
+                                    }
+                                    0x03 => {
+                                        // Domain
+                                        let mut len = [0u8; 1];
+                                        if socket.read_exact(&mut len).await.is_err() {
+                                            return;
+                                        }
+                                        let mut domain = vec![0u8; len[0] as usize];
+                                        if socket.read_exact(&mut domain).await.is_err() {
+                                            return;
+                                        }
+                                        String::from_utf8_lossy(&domain).to_string()
+                                    }
+                                    _ => return,
+                                };
+
+                                let mut port_buf = [0u8; 2];
+                                if socket.read_exact(&mut port_buf).await.is_err() {
+                                    return;
+                                }
+                                let target_port = u16::from_be_bytes(port_buf);
+
+                                // open SSH Direct TCP/IP channel to target host
+                                if let Ok(channel) = session_clone
+                                    .channel_open_direct_tcpip(
+                                        &target_host,
+                                        target_port as u32,
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    // send success response for SOCKS5
+                                    let _ = socket
+                                        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                                        .await;
+
+                                    let (mut reader, mut writer) = socket.split();
+                                    let mut channel_stream = channel.into_stream();
+
+                                    let _ = atoman::io::copy_bidirectional(
+                                        &mut channel_stream,
+                                        &mut atoman::io::join(&mut reader, &mut writer),
+                                    )
+                                    .await;
+                                }
+                            });
+                        }
+                    }
+                }
+                info!("SOCKS5 Proxy loop exited for port `{port}`.");
             });
 
             tx.send(Event::Answer(format!(
-                "Async SOCKS5 Proxy server listening locally on 127.0.0.1:{} via {vps}",
-                action.local_port
+                "SOCKS5 Proxy listening locally on `127.0.0.1:{port}` via `{vps}`."
             )))?;
         }
         "stop" => {
-            // В случае необходимости реализации стопа можно хранить CancellationToken/Handle в стейте
-            tx.send(Event::Answer(format!(
-                "Stopped monitoring/active proxy listeners on port {}.",
-                action.local_port
-            )))?;
+            let mut tunnels = ACTIVE_TUNNELS.lock().unwrap();
+            if let Some(stop_tx) = tunnels.remove(&port) {
+                let _ = stop_tx.send(());
+                info!("Signal sent to stop proxy listener on port `{port}`.");
+                tx.send(Event::Answer(format!(
+                    "Successfully stopped SOCKS5 proxy tunnel on port `{port}`."
+                )))?;
+            } else {
+                warn!("Stop requested, but no active tunnel found registered on port `{port}`");
+                tx.send(Event::Answer(format!(
+                    "No active proxy tunnel found running on port `{port}`."
+                )))?;
+            }
         }
         "status" => {
-            let addr = format!("127.0.0.1:{}", action.local_port);
-            let is_active = TcpListener::bind(&addr).await.is_err();
+            let is_registered = ACTIVE_TUNNELS.lock().unwrap().contains_key(&port);
+            let addr = format!("127.0.0.1:{port}");
+            let is_port_bound = TcpListener::bind(&addr).await.is_err();
 
-            if is_active {
+            if is_registered || is_port_bound {
                 tx.send(Event::Answer(format!(
-                    "Tunnel status for port {}: ACTIVE (Port occupied by active SOCKS5 worker)",
-                    action.local_port
+                    "Tunnel status for port `{port}`: **ACTIVE** (Port occupied by active SOCKS5 worker)"
                 )))?;
             } else {
                 tx.send(Event::Answer(format!(
-                    "No active proxy tunnel found listening on port {}.",
-                    action.local_port
+                    "No active proxy tunnel found listening on port `{port}`."
                 )))?;
             }
         }
         _ => return Err(Error::Custom("Invalid tunnel action".into()).into()),
     }
 
+    info!(
+        "Successfully completed action `tunnel.{}` on port `{port}`.",
+        action.action
+    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
+    info!(
+        "Accepted transfer direction `{}` for host: `{host}`",
+        action.direction
+    );
+
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
     let local_path = expand_home(&action.local_path);
@@ -724,7 +791,7 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> 
                 ))
             })?;
 
-            // Пишем файл напрямую через SSH с помощью base64 потока (безопасно для бинарников)
+            // write file directly via SSH using base64 stream (safe for binary files)
             let encoded = BASE64.encode(content);
             let cmd = format!(
                 "mkdir -p $(dirname '{remote_path}') && echo '{encoded}' | base64 -d > '{remote_path}'"
@@ -760,12 +827,21 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> 
         _ => return Err(Error::Custom("Invalid direction. Use upload/download".into()).into()),
     }
 
+    info!(
+        "Successfully completed transfer direction `{}` for host: `{host}`",
+        action.direction
+    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
+    info!(
+        "Accepted sync for editor `{}` (`{}`) with host: `{host}`",
+        action.editor, action.direction
+    );
+
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
     let home = std::env::var("HOME")
@@ -810,9 +886,13 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Re
     }
 
     tx.send(Event::Answer(format!(
-        "Successfully synchronized `{}` config ({}) with {host}.",
+        "Successfully synchronized `{}` config (`{}`) with `{host}`.",
         action.editor, action.direction
     )))?;
 
+    info!(
+        "Successfully completed sync for editor `{}` with host: `{host}`",
+        action.editor
+    );
     Ok(())
 }

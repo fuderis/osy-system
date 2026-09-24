@@ -28,14 +28,15 @@ pub enum SkillKind {
         description = "Media control (volume, play/pause, stop, next/prev track, search/play music)."
     )]
     #[tools(
-        "get_volume",
-        "set_volume",
-        "increase_volume",
-        "decrease_volume",
+        "get",
+        "set",
+        "increase",
+        "decrease",
         "is_muted",
-        "set_mute",
-        "media_play",
-        "media_pause",
+        "mute",
+        "unmute",
+        "search",
+        "play",
         "media_play_pause",
         "media_stop",
         "media_next_track",
@@ -44,9 +45,7 @@ pub enum SkillKind {
         "media_seek_backward",
         "media_metadata",
         "media_position",
-        "media_duration",
-        "search_music",
-        "play_music"
+        "media_duration"
     )]
     Media,
 

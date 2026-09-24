@@ -25,8 +25,8 @@ pub async fn handle_tool_call(
     info!("Initialized the `{skill}.{tool}` tool handling");
 
     Response::ok().stream(async move |tx| {
-        if let Err(e) = skill.tool_call(tx.clone(), tool, payload.0).await {
-            error!("{e}");
+        if let Err(e) = skill.tool_call(tx.clone(), tool.clone(), payload.0).await {
+            error!("[handle_tool_call{{skill={skill}, tool={tool}}}] {e}");
             tx.send(Event::Error(e.to_string())).ok();
         }
     })

@@ -22,7 +22,7 @@ pub struct ThemeAction {
 pub async fn handle_set(tx: Sender<Bytes>, action: ThemeAction) -> Result<()> {
     match SystemTheme::switch(action.style.clone()).await {
         Ok(_) => {
-            let msg = format!("System theme switched into {} mode", action.style);
+            let msg = format!("System theme switched into `{}` mode.", action.style);
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -32,7 +32,7 @@ pub async fn handle_set(tx: Sender<Bytes>, action: ThemeAction) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_get(_tx: Sender<Bytes>, _action: ()) -> Result<()> {
+pub async fn handle_get(_tx: Sender<Bytes>, _action: JsonValue) -> Result<()> {
     // TODO: write get_theme tool
-    Err(Error::Custom(str!("Action `get system theme` is not implemented yet.")).into())
+    Err(Error::Custom(str!("Action `get theme` is not implemented yet.")).into())
 }
