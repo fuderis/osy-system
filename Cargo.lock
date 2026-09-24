@@ -229,18 +229,6 @@ dependencies = [
 
 [[package]]
 name = "atoman"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50fffe1d365f27f4146ed3b25df173c9e3d0465ae19c9fa1407c4497e5118a85"
-dependencies = [
- "arc-swap",
- "macron 0.1.18",
- "once_cell",
- "tokio",
-]
-
-[[package]]
-name = "atoman"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9997d3b7f7afad75acd734a807b09cb8d4b3218ba3049481f84893049c7226db"
@@ -2667,8 +2655,6 @@ dependencies = [
  "macron-impl-error",
  "macron-impl-from 0.1.1",
  "macron-impl-into 0.1.1",
- "macron-regex",
- "macron-str",
 ]
 
 [[package]]
@@ -3643,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "osy-system"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anylm",
  "atoman 0.11.6",
@@ -5546,16 +5532,16 @@ dependencies = [
 
 [[package]]
 name = "system-utils"
-version = "0.1.6"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52718270ac77c7359c32d3fbc42c83fc78b151664bc69afffc2a4c4d14bcc3d"
+checksum = "bd2a1eccbb3cc1fa89eabd318b5c847b79b65191d697385468af573d6427ef1d"
 dependencies = [
- "atoman 0.4.5",
+ "atoman 0.11.6",
  "battery",
  "chrono",
  "cpal",
  "display-info",
- "macron 0.2.1",
+ "macron 0.5.1",
  "network-interface",
  "nokhwa",
  "pollster",
@@ -5563,7 +5549,6 @@ dependencies = [
  "rusb",
  "serde",
  "sysinfo",
- "tokio",
  "wgpu",
 ]
 
