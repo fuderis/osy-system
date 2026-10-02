@@ -1,31 +1,15 @@
 use crate::prelude::*;
 
-use anylm::api::{Schema, Tool};
+use anylm::{Schema, api::Tool};
 use system_utils::{PowerManager, power::PowerMode};
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
         // ________________________________________
         //              SCHEDULE POWER
-        Tool::new(
+        Tool::typed::<PowerAction>(
             "schedule",
             "Schedules or immediately executes a system power action.",
-        )
-        .required_property(
-            "mode",
-            Schema::string("Power action to perform.").variants(set![
-                "shutdown".into(),
-                "reboot".into(),
-                "suspend".into(),
-                "lock".into(),
-                "logout".into(),
-            ]),
-        )
-        .optional_property(
-            "timestamp",
-            Schema::string(
-                "Optional ISO-8601 UTC datetime. If omitted, the action is executed immediately.",
-            ),
         ),
         // ________________________________________
         //              CANCEL SCHEDULING
@@ -42,10 +26,15 @@ pub fn tools_list() -> Vec<Tool> {
     ]
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Schema)]
 pub struct PowerAction {
-    timestamp: Option<DateTime<Utc>>,
+    /// Power action to perform.
+    #[schema(serde_json)]
+    #[schema(variants = ["shutdown", "reboot", "suspend", "lock", "logout"])]
     mode: PowerMode,
+    /// Optional ISO-8601 UTC datetime. If omitted, the action is executed immediately.
+    #[schema(serde_json)]
+    timestamp: Option<DateTime<Utc>>,
 }
 
 #[log(mode = %action.mode)]

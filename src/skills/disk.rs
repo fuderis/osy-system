@@ -1,81 +1,68 @@
 use crate::prelude::*;
 
-use anylm::api::{Schema, Tool};
+use anylm::{Schema, api::Tool};
 use atoman::process::Command;
 use pearce::stream::futures::FutureExt;
-use std::path::Path;
-
-// ============================================================================
-// TOOLS DEFINITION
-// ============================================================================
+use std::process::Stdio;
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
-        // ________________________________________
-        //               LIST DISKS
-        Tool::new(
+        Tool::typed::<ListAction>(
             "list",
             "Lists all available storage devices, block devices, and their partition tables.",
         ),
-        // ________________________________________
-        //               MOUNT DISK
-        Tool::new(
+        Tool::typed::<MountAction>(
             "mount",
             "Mounts a specific disk partition or block device to a target mount point.",
-        )
-        .required_property(
-            "target",
-            Schema::string("Path, name, UUID, or label of the block device or partition (e.g., 'sdb1', '/dev/sdb1', or 'DATA')."),
-        )
-        .optional_property(
-            "point",
-            Schema::string("Optional mount point directory. If omitted, a default path under /run/media/$USER/ will be used."),
         ),
-        // ________________________________________
-        //              UNMOUNT DISK
-        Tool::new(
-            "unmount",
-            "Unmounts a mounted disk partition or device.",
-        )
-        .required_property(
-            "target",
-            Schema::string("Path, name, UUID, label, or mount point of the device to unmount."),
-        ),
-        // ________________________________________
-        //               REPAIR DISK
-        Tool::new(
+        Tool::typed::<UnmountAction>("unmount", "Unmounts a mounted disk partition or device."),
+        Tool::typed::<RepairAction>(
             "repair",
             "Checks and attempts to repair file system errors on a partition.",
-        )
-        .required_property(
-            "target",
-            Schema::string("Path, name, UUID, or label of the block device/partition to check or repair."),
         ),
-        // ________________________________________
-        //               FORMAT DISK (DISABLED FOR NOW)
-        Tool::new(
+        Tool::typed::<FormatAction>(
             "format",
             "Formats a disk partition or drive with the specified file system. WARNING: Deletes all data on target.",
-        )
-        .required_property(
-            "target",
-            Schema::string("Path, name, UUID, or label of the target partition/device (e.g., 'sdb1')."),
-        )
-        .required_property(
-            "fs",
-            Schema::string("Type of file system to apply.").variants(set![
-                "ext4".into(),
-                "btrfs".into(),
-                "ntfs".into(),
-                "vfat".into(),
-                "exfat".into(),
-            ]),
-        )
-        .optional_property(
-            "label",
-            Schema::string("Optional volume label/name for the formatted partition."),
         ),
     ]
+}
+
+// ============================================================================
+// DTO STRUCTS
+// ============================================================================
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct ListAction {}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct MountAction {
+    /// Path, name, UUID, or label of the block device or partition (e.g., 'sdb1', '/dev/sdb1', or 'DATA').
+    pub target: String,
+    /// Optional mount point directory. If omitted, a default path under /run/media/$USER/ will be used.
+    pub point: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct UnmountAction {
+    /// Path, name, UUID, label, or mount point of the device to unmount.
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct RepairAction {
+    /// Path, name, UUID, or label of the block device/partition to check or repair.
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct FormatAction {
+    /// Path, name, UUID, or label of the target partition/device (e.g., 'sdb1').
+    pub target: String,
+    /// Type of file system to apply.
+    #[schema(variants = ["ext4", "btrfs", "ntfs", "vfat", "exfat"])]
+    pub fs: String,
+    /// Optional volume label/name for the formatted partition.
+    pub label: Option<String>,
 }
 
 // ============================================================================
@@ -123,33 +110,6 @@ struct ToolPkg {
 }
 
 // ============================================================================
-// DTO STRUCTS
-// ============================================================================
-
-#[derive(Deserialize)]
-pub struct MountAction {
-    target: String,
-    point: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct UnmountAction {
-    target: String,
-}
-
-#[derive(Deserialize)]
-pub struct RepairAction {
-    target: String,
-}
-
-#[derive(Deserialize)]
-pub struct FormatAction {
-    target: String,
-    fs: String,
-    label: Option<String>,
-}
-
-// ============================================================================
 // INTERNAL HELPERS
 // ============================================================================
 
@@ -158,6 +118,8 @@ pub async fn list() -> Result<Vec<Device>> {
     {
         let output = Command::new("lsblk")
             .args(["--json", "-O"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .output()
             .await?;
 
@@ -344,6 +306,8 @@ fn build_mount_path(dev: &Device, custom_point: Option<&str>) -> String {
 async fn ensure_mount_dir(mount_path: &str) -> Result<()> {
     let status = Command::new("sudo")
         .args(["mkdir", "-p", mount_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await?;
 
@@ -360,6 +324,8 @@ async fn try_mount_rw(dev_path: &str, mount_path: &str) -> Result<()> {
 
     let status = Command::new("sudo")
         .args(["timeout", "15", "mount", dev_path, mount_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await?;
 
@@ -376,6 +342,8 @@ async fn try_mount_ro(dev_path: &str, mount_path: &str) -> Result<()> {
 
     let status = Command::new("sudo")
         .args(["timeout", "10", "mount", "-o", "ro", dev_path, mount_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await?;
 
@@ -390,6 +358,8 @@ async fn try_mount_ro(dev_path: &str, mount_path: &str) -> Result<()> {
 async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
     let status = Command::new("sh")
         .args(["-c", &format!("command -v {}", repair.tool)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await?;
 
@@ -401,6 +371,8 @@ async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
 
     let status = Command::new("sh")
         .args(["-c", &format!("command -v {}", repair.tool)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await?;
 
@@ -429,6 +401,8 @@ async fn install_package(package: &str) -> Result<()> {
     for (manager, args) in managers {
         let exists = Command::new("sh")
             .args(["-c", &format!("command -v {manager}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .await?;
 
@@ -439,11 +413,18 @@ async fn install_package(package: &str) -> Result<()> {
         if manager == "apt" {
             let _ = Command::new("sudo")
                 .args(["apt", "update"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .await?;
         }
 
-        let status = Command::new("sudo").args(args).status().await?;
+        let status = Command::new("sudo")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
 
         if status.success() {
             return Ok(());
@@ -480,6 +461,8 @@ async fn perform_unmount(target: &str) -> Result<String> {
 
     let output = Command::new("sudo")
         .args(["umount", dev_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .await?;
 
@@ -498,6 +481,8 @@ async fn perform_unmount(target: &str) -> Result<String> {
     if mountpoint.starts_with("/run/media/") && Path::new(&mountpoint).exists() {
         let _ = Command::new("sudo")
             .args(["rmdir", &mountpoint])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .await;
     }
@@ -588,7 +573,11 @@ async fn perform_repair(target: &str) -> Result<String> {
         }
     }
 
-    let status = cmd.status().await?;
+    let status = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
     let mut code = status.code().unwrap_or(1);
 
     if repair.tool == "e2fsck" && code == 1 {
@@ -640,7 +629,7 @@ pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
 pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!()?;
+        osy_share::ensure_sudo_priv!();
 
         let dev = find(&action.target).await?;
 
@@ -706,7 +695,7 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
 pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!()?;
+        osy_share::ensure_sudo_priv!();
 
         let msg = perform_unmount(&action.target).await?;
         info!("{msg}");
@@ -724,7 +713,7 @@ pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<
 pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!()?;
+        osy_share::ensure_sudo_priv!();
 
         let msg = perform_repair(&action.target).await?;
         info!("{msg}");
@@ -742,7 +731,7 @@ pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()
 pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!()?;
+        osy_share::ensure_sudo_priv!();
 
         // check device before requesting confirmation
         let dev = find(&action.target).await?;
@@ -817,7 +806,12 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
         }
         args.push(dev_path);
 
-        let status = Command::new("sudo").args(&args).status().await?;
+        let status = Command::new("sudo")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .args(&args)
+            .status()
+            .await?;
         if !status.success() {
             return Err(
                 Error::Custom(format!("Failed to format '{dev_path}' as {}", action.fs)).into(),

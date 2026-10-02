@@ -1,20 +1,20 @@
 use crate::prelude::*;
 
-use anylm::api::{Schema, Tool};
+use anylm::{Schema, api::Tool};
 use system_utils::{SystemTheme, ThemeStyle};
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
-        Tool::new("set", "Changes the system appearance theme.").required_property(
-            "style",
-            Schema::string("Target theme style.").variants(set!["light".into(), "dark".into()]),
-        ),
+        Tool::typed::<ThemeAction>("set", "Changes the system appearance theme."),
         Tool::new("get", "Gets current system theme."),
     ]
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Schema)]
 pub struct ThemeAction {
+    /// Target theme style.
+    #[schema(serde_json)]
+    #[schema(variants = ["light", "dark"])]
     style: ThemeStyle,
 }
 

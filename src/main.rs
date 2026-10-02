@@ -28,7 +28,7 @@ use skills::SkillKind;
 
 #[atoman::main]
 async fn main() -> Result<()> {
-    osy_share::macos_protection!();
+    osy_share::macos_proc_protect!();
 
     // init agent metadata
     AgentMeta::init(pkg_meta!(), SkillKind::skills_list()).await;

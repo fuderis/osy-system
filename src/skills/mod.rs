@@ -73,9 +73,9 @@ pub enum SkillKind {
 
     #[skill(
         module = "infra",
-        description = "Remote VPS infrastructure management (diagnostics, users, autossh tunnels, rsync file transfer, config sync).",
+        description = "Remote VPS infrastructure management (diagnostics, users, rsync file transfer, config sync).",
         prompt = "You can safely run the necessary commands - the user will still receive a prompt for confirmation."
     )]
-    #[tools("info", "user", "tunnel", "transfer", "sync")]
+    #[tools("info", "user", "transfer", "sync")]
     Infra,
 }

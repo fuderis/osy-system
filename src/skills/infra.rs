@@ -1,130 +1,32 @@
 use crate::prelude::*;
 
-use anylm::api::{Schema, Tool};
-use atoman::{
-    fs,
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::oneshot,
-};
+use anylm::{Schema, api::Tool};
+use atoman::fs;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use russh::{
     client::{self, Config, Handler},
     keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
 use russh_keys::ssh_key::rand_core::OsRng;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-
-// Registry to keep track of active tunnel cancellation channels by local port
-static ACTIVE_TUNNELS: LazyLock<Mutex<HashMap<u16, oneshot::Sender<()>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-// ============================================================================
-// TOOLS DEFINITION
-// ============================================================================
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
-        // ________________________________________
-        //                  INFRA INFO
-        Tool::new(
+        Tool::typed::<InfoAction>(
             "info",
             "Fetches diagnostics, CPU/RAM usage, active services, and OS stats from a remote VPS.",
-        )
-        .optional_property(
-            "host",
-            Schema::string("Target VPS IP/Host (e.g. '192.168.1.1' or 'user@192.168.1.1'). Omit for DEFAULT_VPS_HOST."),
-        )
-        .optional_property(
-            "identity_file",
-            Schema::string("Path to private SSH key file. Defaults to ~/.ssh/id_ed25519."),
         ),
-        // ________________________________________
-        //                  USER MANAGEMENT
-        Tool::new(
+        Tool::typed::<UserAction>(
             "user",
             "Comprehensive user and SSH key lifecycle management on target Linux VPS.",
-        )
-        .required_property(
-            "action",
-            Schema::string("Action to perform.").variants(set![
-                "create".into(),
-                "remove".into(),
-                "list".into(),
-                "add_ssh_key".into(),
-                "add_ssh_key_from_file".into(),
-                "generate_ssh_key".into(),
-                "set_sudo".into(),
-            ]),
-        )
-        .optional_property("username", Schema::string("Target username on the VPS."))
-        .optional_property("pubkey", Schema::string("Raw SSH public key content."))
-        .optional_property("key_path", Schema::string("Path to local key file to upload."))
-        .optional_property("sudo", Schema::boolean("Grant (true) or revoke (false) sudo privileges."))
-        .optional_property("host", Schema::string("Target VPS host. Omit for default."))
-        .optional_property("identity_file", Schema::string("Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.")),
-        // ________________________________________
-        //                  AUTOSSH TUNNEL / SOCKS5
-        Tool::new(
-            "tunnel",
-            "Manages persistent SOCKS5 SSH proxy tunnel using pure Rust async runtime.",
-        )
-        .required_property(
-            "action",
-            Schema::string("Tunnel lifecycle action.").variants(set![
-                "start".into(),
-                "stop".into(),
-                "status".into(),
-            ]),
-        )
-        .optional_property("local_port", Schema::integer("Local port to bind (default: 1080)."))
-        .optional_property("vps_host", Schema::string("Target VPS SSH host. Omit for default."))
-        .optional_property("identity_file", Schema::string("Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.")),
-        // ________________________________________
-        //                  FILE TRANSFER
-        Tool::new(
+        ),
+        Tool::typed::<TransferAction>(
             "transfer",
             "Uploads or downloads files/directories over SSH.",
-        )
-        .required_property(
-            "direction",
-            Schema::string("Direction of transfer.").variants(set![
-                "upload".into(),
-                "download".into(),
-            ]),
-        )
-        .required_property("local_path", Schema::string("Local file path."))
-        .required_property("remote_path", Schema::string("Remote file path."))
-        .optional_property("host", Schema::string("Target VPS host. Omit for default."))
-        .optional_property("identity_file", Schema::string("Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.")),
-        // ________________________________________
-        //                  CONFIG SYNC
-        Tool::new(
+        ),
+        Tool::typed::<SyncConfigAction>(
             "sync",
             "Synchronizes editor configurations (Helix, Neovim, Vim) between local machine and VPS.",
-        )
-        .required_property(
-            "editor",
-            Schema::string("Editor to sync.").variants(set![
-                "helix".into(),
-                "neovim".into(),
-                "vim".into(),
-            ]),
-        )
-        .required_property(
-            "direction",
-            Schema::string("Sync direction.").variants(set![
-                "push".into(), // local -> remote
-                "pull".into(), // remote -> local
-            ]),
-        )
-        .optional_property("host", Schema::string("Target VPS host. Omit for default."))
-        .optional_property("identity_file", Schema::string("Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.")),
+        ),
     ]
 }
 
@@ -132,50 +34,59 @@ pub fn tools_list() -> Vec<Tool> {
 // DTO STRUCTS
 // ============================================================================
 
-#[derive(Deserialize)]
-pub struct InfraInfoAction {
+#[derive(Debug, Deserialize, Schema)]
+pub struct InfoAction {
+    /// Target VPS IP/Host (e.g. '192.168.1.1' or 'user@192.168.1.1'). Omit for DEFAULT_VPS_HOST.
     pub host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
     pub identity_file: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct InfraUserAction {
+#[derive(Debug, Deserialize, Schema)]
+pub struct UserAction {
+    /// Action to perform.
+    #[schema(variants = ["create", "remove", "list", "add_ssh_key", "add_ssh_key_from_file", "generate_ssh_key", "set_sudo"])]
     pub action: String,
+    /// Target username on the VPS.
     pub username: Option<String>,
+    /// Raw SSH public key content.
     pub pubkey: Option<String>,
+    /// Path to local key file to upload.
     pub key_path: Option<String>,
+    /// Grant (true) or revoke (false) sudo privileges.
     pub sudo: Option<bool>,
+    /// Target VPS host. Omit for default.
     pub host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
     pub identity_file: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct InfraTunnelAction {
-    pub action: String,
-    #[serde(default = "default_port")]
-    pub local_port: u16,
-    pub vps_host: Option<String>,
-    pub identity_file: Option<String>,
-}
-
-fn default_port() -> u16 {
-    1080
-}
-
-#[derive(Deserialize)]
-pub struct InfraTransferAction {
+#[derive(Debug, Deserialize, Schema)]
+pub struct TransferAction {
+    /// Direction of transfer.
+    #[schema(variants = ["upload", "download"])]
     pub direction: String,
+    /// Local file path.
     pub local_path: String,
+    /// Remote file path.
     pub remote_path: String,
+    /// Target VPS host. Omit for default.
     pub host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
     pub identity_file: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct InfraSyncConfigAction {
+#[derive(Debug, Deserialize, Schema)]
+pub struct SyncConfigAction {
+    /// Editor to sync.
+    #[schema(variants = ["helix", "neovim", "vim"])]
     pub editor: String,
+    /// Sync direction.
+    #[schema(variants = ["push", "pull"])]
     pub direction: String,
+    /// Target VPS host. Omit for default.
     pub host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
     pub identity_file: Option<String>,
 }
 
@@ -380,7 +291,7 @@ async fn upload_pubkey_to_vps(conn: &mut SshConnection, user: &str, pubkey: &str
 // ============================================================================
 
 #[log()]
-pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<()> {
+pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
@@ -398,7 +309,7 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfraInfoAction) -> Result<(
 }
 
 #[log()]
-pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<()> {
+pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
     let identity = action.identity_file.as_deref();
 
@@ -588,174 +499,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: InfraUserAction) -> Result<(
 }
 
 #[log()]
-pub async fn handle_tunnel(tx: Sender<Bytes>, action: InfraTunnelAction) -> Result<()> {
-    let port = action.local_port;
-
-    let vps = resolve_host(action.vps_host.as_deref())?;
-
-    match action.action.as_str() {
-        "start" => {
-            let addr = format!("127.0.0.1:{port}");
-            let listener = TcpListener::bind(&addr).await.map_err(|e| {
-                Error::Custom(format!("Port {port} is already in use or bind failed: {e}"))
-            })?;
-
-            let conn = SshConnection::connect(&vps, action.identity_file.as_deref()).await?;
-            let session = Arc::new(conn.session);
-
-            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-            {
-                let mut tunnels = ACTIVE_TUNNELS.lock().unwrap();
-                if let Some(old_stop_tx) = tunnels.insert(port, stop_tx) {
-                    let _ = old_stop_tx.send(());
-                }
-            }
-
-            // spawn async SOCKS5 proxy server task with graceful cancellation support
-            atoman::spawn(async move {
-                loop {
-                    atoman::select! {
-                        _ = &mut stop_rx => {
-                            info!("Shutdown signal received. Stopping SOCKS5 proxy on port `{port}`...");
-                            break;
-                        }
-                        accept_res = listener.accept() => {
-                            let (mut socket, _) = match accept_res {
-                                Ok(res) => res,
-                                Err(e) => {
-                                    error!("Failed to accept TCP connection on port `{port}`: {e}");
-                                    break;
-                                }
-                            };
-
-                            let session_clone = Arc::clone(&session);
-                            atoman::spawn(async move {
-                                // SOCKS5 proxy handshaking
-                                let mut buf = [0u8; 256];
-                                if socket.read_exact(&mut buf[..2]).await.is_err() {
-                                    return;
-                                }
-                                let nmethods = buf[1] as usize;
-                                if socket.read_exact(&mut buf[..nmethods]).await.is_err() {
-                                    return;
-                                }
-                                // NO AUTH response
-                                if socket.write_all(&[0x05, 0x00]).await.is_err() {
-                                    return;
-                                }
-
-                                // SOCKS Request
-                                if socket.read_exact(&mut buf[..4]).await.is_err() {
-                                    return;
-                                }
-                                if buf[1] != 0x01 {
-                                    return; // support only CONNECT
-                                }
-
-                                let target_host = match buf[3] {
-                                    0x01 => {
-                                        // IPv4
-                                        let mut ip = [0u8; 4];
-                                        if socket.read_exact(&mut ip).await.is_err() {
-                                            return;
-                                        }
-                                        std::net::Ipv4Addr::from(ip).to_string()
-                                    }
-                                    0x03 => {
-                                        // Domain
-                                        let mut len = [0u8; 1];
-                                        if socket.read_exact(&mut len).await.is_err() {
-                                            return;
-                                        }
-                                        let mut domain = vec![0u8; len[0] as usize];
-                                        if socket.read_exact(&mut domain).await.is_err() {
-                                            return;
-                                        }
-                                        String::from_utf8_lossy(&domain).to_string()
-                                    }
-                                    _ => return,
-                                };
-
-                                let mut port_buf = [0u8; 2];
-                                if socket.read_exact(&mut port_buf).await.is_err() {
-                                    return;
-                                }
-                                let target_port = u16::from_be_bytes(port_buf);
-
-                                // open SSH Direct TCP/IP channel to target host
-                                if let Ok(channel) = session_clone
-                                    .channel_open_direct_tcpip(
-                                        &target_host,
-                                        target_port as u32,
-                                        "127.0.0.1",
-                                        0,
-                                    )
-                                    .await
-                                {
-                                    // send success response for SOCKS5
-                                    let _ = socket
-                                        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                                        .await;
-
-                                    let (mut reader, mut writer) = socket.split();
-                                    let mut channel_stream = channel.into_stream();
-
-                                    let _ = atoman::io::copy_bidirectional(
-                                        &mut channel_stream,
-                                        &mut atoman::io::join(&mut reader, &mut writer),
-                                    )
-                                    .await;
-                                }
-                            });
-                        }
-                    }
-                }
-                info!("SOCKS5 Proxy loop exited for port `{port}`.");
-            });
-
-            tx.send(Event::Answer(format!(
-                "SOCKS5 Proxy listening locally on `127.0.0.1:{port}` via `{vps}`."
-            )))?;
-        }
-        "stop" => {
-            let mut tunnels = ACTIVE_TUNNELS.lock().unwrap();
-
-            let msg = if let Some(stop_tx) = tunnels.remove(&port) {
-                let _ = stop_tx.send(());
-                info!("Signal sent to stop proxy listener on port `{port}`.");
-                format!("Successfully stopped SOCKS5 proxy tunnel on port `{port}`.")
-            } else {
-                warn!("Stop requested, but no active tunnel found registered on port `{port}`");
-                format!("No active proxy tunnel found running on port `{port}`.")
-            };
-
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-        }
-        "status" => {
-            let is_registered = ACTIVE_TUNNELS.lock().unwrap().contains_key(&port);
-            let addr = format!("127.0.0.1:{port}");
-            let is_port_bound = TcpListener::bind(&addr).await.is_err();
-
-            let msg = if is_registered || is_port_bound {
-                format!(
-                    "Tunnel status for port `{port}`: **ACTIVE** (Port occupied by active SOCKS5 worker)"
-                )
-            } else {
-                format!("No active proxy tunnel found listening on port `{port}`.")
-            };
-
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-        }
-        _ => return Err(Error::Custom("Invalid tunnel action".into()).into()),
-    }
-
-    Ok(())
-}
-
-#[log()]
-pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> Result<()> {
+pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
@@ -784,6 +528,7 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> 
                 local_path.display()
             )))?;
         }
+
         "download" => {
             let cmd = format!("base64 '{remote_path}'");
             let output = conn.exec(&cmd).await?;
@@ -812,7 +557,7 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: InfraTransferAction) -> 
 }
 
 #[log()]
-pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Result<()> {
+pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<()> {
     let host = resolve_host(action.host.as_deref())?;
 
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
@@ -841,6 +586,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Re
                 .into());
             }
         }
+
         "pull" => {
             let cmd = format!("base64 '~/{remote_rel}'");
             let output = conn.exec(&cmd).await?;
@@ -855,6 +601,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: InfraSyncConfigAction) -> Re
             }
             fs::write(&local_full, decoded).await?;
         }
+
         _ => return Err(Error::Custom("Invalid direction. Use push/pull".into()).into()),
     }
 

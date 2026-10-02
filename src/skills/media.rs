@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use anylm::api::{Schema, Tool};
+use anylm::{Schema, api::Tool};
 use music_index::{MusicIndexer, SearchIntent};
 use system_utils::{AudioControl, MediaControl};
 
@@ -11,69 +11,42 @@ pub fn tools_list() -> Vec<Tool> {
         // ________________________________________
         // AUDIO CONTROL
         //
-
-        Tool::new(
+        Tool::typed::<SetVolumeAction>(
             "set",
             "Sets the system audio volume to the specified percentage.",
-        )
-        .required_property(
-            "volume",
-            Schema::integer("Target audio volume percentage (0-100)."),
         ),
         Tool::new(
             "get",
             "Returns the current system audio volume percentage (0-100).",
         ),
-        Tool::new(
+        Tool::typed::<DeltaVolumeAction>(
             "increase",
             "Increases the system audio volume by the specified percentage.",
-        )
-        .required_property(
-            "amount",
-            Schema::integer("Amount to increase the audio volume by."),
         ),
-        Tool::new(
+        Tool::typed::<DeltaVolumeAction>(
             "decrease",
             "Decreases the system audio volume by the specified percentage.",
-        )
-        .required_property(
-            "amount",
-            Schema::integer("Amount to decrease the audio volume by."),
         ),
-        
         Tool::new(
             "is_muted",
             "Checks if the system audio is currently muted. Returns a boolean representation.",
         ),
         Tool::new("mute", "Mutes the system audio."),
         Tool::new("unmute", "Unmutes the system audio."),
-
         // ________________________________________
         // MUSIC INDEX
         //
-
-        Tool::new(
+        Tool::typed::<MusicAction>(
             "search",
             "Searches the local music library without starting playback. (If you need to play the music immediately, it’s better to use the play_music tool).",
-        )
-        .optional_property("band", Schema::string("Artist or band name."))
-        .optional_property("album", Schema::string("Album title."))
-        .optional_property("track", Schema::string("Track title."))
-        .optional_property("genre", Schema::string("Music genre.")),
-
-        Tool::new(
+        ),
+        Tool::typed::<MusicAction>(
             "play",
             "Searches the local music library and immediately starts playback.",
-        )
-        .optional_property("band", Schema::string("Artist or band name."))
-        .optional_property("album", Schema::string("Album title."))
-        .optional_property("track", Schema::string("Track title."))
-        .optional_property("genre", Schema::string("Music genre.")),
-
+        ),
         // ________________________________________
-        // MEDIA CONTROl
+        // MEDIA CONTROL
         //
-
         // #[cfg(target_os = "linux")]
         // Tool::new("media_play", "Starts media playback."),
         // #[cfg(target_os = "linux")]
@@ -83,22 +56,14 @@ pub fn tools_list() -> Vec<Tool> {
         Tool::new("media_next_track", "Skips to the next track."),
         Tool::new("media_previous_track", "Returns to the previous track."),
         #[cfg(target_os = "linux")]
-        Tool::new(
+        Tool::typed::<SeekAction>(
             "media_seek_forward",
             "Seeks forward by the specified number of seconds.",
-        )
-        .required_property(
-            "seconds",
-            Schema::integer("Number of seconds to seek forward."),
         ),
         #[cfg(target_os = "linux")]
-        Tool::new(
+        Tool::typed::<SeekAction>(
             "media_seek_backward",
             "Seeks backward by the specified number of seconds.",
-        )
-        .required_property(
-            "seconds",
-            Schema::integer("Number of seconds to seek backward."),
         ),
         #[cfg(target_os = "linux")]
         Tool::new(
@@ -115,27 +80,46 @@ pub fn tools_list() -> Vec<Tool> {
     ]
 }
 
-#[derive(Deserialize)]
-pub struct SeekAction {
-    seconds: u32,
-}
+// ============================================================================
+// DTO STRUCTS
+// ============================================================================
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Schema)]
 pub struct SetVolumeAction {
-    volume: u32,
+    /// Target audio volume percentage (0-100).
+    pub volume: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Schema)]
 pub struct DeltaVolumeAction {
-    amount: u32,
+    /// Amount to change the audio volume by.
+    pub amount: u32,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct MusicAction {
+    /// Artist or band name.
+    pub band: Option<String>,
+    /// Album title.
+    pub album: Option<String>,
+    /// Track title.
+    pub track: Option<String>,
+    /// Music genre.
+    pub genre: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct SeekAction {
+    /// Number of seconds to seek.
+    pub seconds: u32,
 }
 
 #[log(volume = %action.volume)]
 pub async fn handle_set(tx: Sender<Bytes>, action: SetVolumeAction) -> Result<()> {
-    match AudioControl::set_volume(action.volume as u32).await {
+    match AudioControl::set_volume(action.volume).await {
         Ok(_) => {
             let msg = str!(
-                "Audio volume updated successfully. Current volume: {}%.",
+                "Audio volume updated successfully. Current volume: `{}%`.",
                 action.volume
             );
             info!("{msg}");
@@ -151,7 +135,7 @@ pub async fn handle_increase(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Re
     match AudioControl::increase_volume(action.amount).await {
         Ok(volume) => {
             let msg =
-                format!("The audio volume increased successfully. Current volume: {volume}%.",);
+                format!("The audio volume increased successfully. Current volume: `{volume}%`.",);
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -165,7 +149,7 @@ pub async fn handle_decrease(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Re
     match AudioControl::decrease_volume(action.amount).await {
         Ok(volume) => {
             let msg =
-                format!("The audio volume decreased successfully. Current volume: {volume}%.",);
+                format!("The audio volume decreased successfully. Current volume: `{volume}%`.",);
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -178,7 +162,7 @@ pub async fn handle_decrease(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Re
 pub async fn handle_get(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
     match AudioControl::get_volume().await {
         Ok(volume) => {
-            let msg = format!("The current audio volume level is {volume}%.");
+            let msg = format!("The current audio volume level is `{volume}%`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -230,15 +214,6 @@ pub async fn handle_is_muted(tx: Sender<Bytes>, _payload: JsonValue) -> Result<(
     }
 }
 
-#[derive(Deserialize)]
-pub struct MusicAction {
-    pub query: Option<String>,
-    pub band: Option<String>,
-    pub album: Option<String>,
-    pub track: Option<String>,
-    pub genre: Option<String>,
-}
-
 async fn music_index() -> Result<MusicIndexer> {
     if MUSIC_INDEX.get().is_none() {
         let index = MusicIndexer::scan_default(path!("$cache$/music-index.json")).await?;
@@ -252,34 +227,35 @@ async fn music_index() -> Result<MusicIndexer> {
         .ok_or_else(|| format!("Failed to initialize music indexer").into())
 }
 
-#[log(query = %action.query.clone().unwrap_or_default())]
-pub async fn handle_search(tx: Sender<Bytes>, mut action: MusicAction) -> Result<()> {
+impl From<MusicAction> for SearchIntent {
+    fn from(mut action: MusicAction) -> Self {
+        if action.band.is_none()
+            && action.album.is_none()
+            && action.genre.is_none()
+            && action.track.is_some()
+        {
+            SearchIntent::Global(action.track.take().unwrap())
+        } else {
+            SearchIntent::Targeted {
+                band: action.band,
+                album: action.album,
+                track: action.track,
+                genre: action.genre,
+            }
+        }
+    }
+}
+
+#[log()]
+pub async fn handle_search(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
     let music_index = music_index().await?;
 
-    let intent = if let Some(query) = action.query {
-        SearchIntent::Global(query)
-    } else if action.band.is_none()
-        && action.album.is_none()
-        && action.genre.is_none()
-        && action.track.is_some()
-    {
-        SearchIntent::Global(action.track.take().unwrap())
-    } else {
-        SearchIntent::Targeted {
-            band: action.band,
-            album: action.album,
-            track: action.track,
-            genre: action.genre,
-        }
-    };
-
-    let target = music_index.search(intent);
+    let target = music_index.search(action.into());
     let tracks = target.tracks();
 
     let msg = if tracks.is_empty() {
         format!("No matching music was found.")
     } else {
-        // Берем первые 30 треков для контекста LLM
         let limit = 30;
         let preview: Vec<_> = tracks
             .iter()
@@ -308,28 +284,11 @@ pub async fn handle_search(tx: Sender<Bytes>, mut action: MusicAction) -> Result
     Ok(())
 }
 
-#[log(query = %action.query.clone().unwrap_or_default())]
-pub async fn handle_play(tx: Sender<Bytes>, mut action: MusicAction) -> Result<()> {
+#[log()]
+pub async fn handle_play(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
     let music_index = music_index().await?;
 
-    let intent = if let Some(query) = action.query {
-        SearchIntent::Global(query)
-    } else if action.band.is_none()
-        && action.album.is_none()
-        && action.genre.is_none()
-        && action.track.is_some()
-    {
-        SearchIntent::Global(action.track.take().unwrap())
-    } else {
-        SearchIntent::Targeted {
-            band: action.band,
-            album: action.album,
-            track: action.track,
-            genre: action.genre,
-        }
-    };
-
-    let target = music_index.search(intent);
+    let target = music_index.search(action.into());
     let tracks = target.tracks();
 
     if tracks.is_empty() {
@@ -344,7 +303,7 @@ pub async fn handle_play(tx: Sender<Bytes>, mut action: MusicAction) -> Result<(
         .await?;
 
     let msg = str!(
-        "Started playback of {count} track(s).",
+        "Started playback of `{count}` track(s).",
         count = tracks.len()
     );
 
