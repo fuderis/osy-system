@@ -7,9 +7,13 @@ use std::process::Stdio;
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
-        Tool::typed::<ListAction>(
+        Tool::new(
             "list",
             "Lists all available storage devices, block devices, and their partition tables.",
+        ),
+        Tool::typed::<InfoAction>(
+            "info",
+            "Displays detailed information, parameters, and partition structure for a specific storage device or partition.",
         ),
         Tool::typed::<MountAction>(
             "mount",
@@ -32,7 +36,10 @@ pub fn tools_list() -> Vec<Tool> {
 // ============================================================================
 
 #[derive(Debug, Deserialize, Schema)]
-pub struct ListAction {}
+pub struct InfoAction {
+    /// Path, name, UUID, label, or mount point of the target device (e.g., 'sdb1', '/dev/sdb1', or 'DATA').
+    pub target: String,
+}
 
 #[derive(Debug, Deserialize, Schema)]
 pub struct MountAction {
@@ -241,50 +248,113 @@ fn free(dev: &Device) -> Option<String> {
 
 fn format_disk_tree(devices: &[Device]) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "{:<16} {:<14} {:<8} {:<8} {:<14} {:<16} {}\n",
-        "NAME", "LABEL", "FS", "SIZE", "USED", "FREE", "MOUNT"
-    ));
-    out.push_str(&format!("{}\n", "─".repeat(110)));
+    out.push_str("| Name | Label | FS | Size | Used | Free | Mount Point |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
 
+    let len = devices.len();
     for (i, dev) in devices.iter().enumerate() {
-        out.push_str(&format!("{}\n", dev.name));
-        append_children(&mut out, &dev.children, "");
-
-        if i + 1 != devices.len() {
-            out.push('\n');
-        }
+        let is_last = i + 1 == len;
+        append_device_rows(&mut out, dev, 0, is_last, "");
     }
 
     out
 }
 
-fn append_children(out: &mut String, devices: &[Device], prefix: &str) {
-    for (i, dev) in devices.iter().enumerate() {
-        let last = i + 1 == devices.len();
-        let d = display_device(dev);
+fn append_device_rows(out: &mut String, dev: &Device, depth: usize, is_last: bool, prefix: &str) {
+    let d = display_device(dev);
 
-        out.push_str(&format!(
-            "{}{}{:<14} {:<14} {:<8} {:<8} {:<14} {:<16} {}\n",
-            prefix,
-            if last { "└ " } else { "├ " },
-            d.name,
-            d.label.unwrap_or("—"),
-            d.fstype.unwrap_or("—"),
-            d.size.unwrap_or("—"),
-            d.used.as_deref().unwrap_or("—"),
-            d.free.as_deref().unwrap_or("—"),
-            d.mount.unwrap_or("—"),
-        ));
+    let branch = if depth > 0 {
+        if is_last { "└ " } else { "├ " }
+    } else {
+        ""
+    };
 
-        let next_prefix = if last {
-            format!("{prefix}    ")
+    let name_field = format!("{}{}`{}`", prefix, branch, d.name);
+
+    out.push_str(&format!(
+        "| {} | **{}** | `{}` | {} | {} | {} | `{}` |\n",
+        name_field,
+        d.label.unwrap_or("—"),
+        d.fstype.unwrap_or("—"),
+        d.size.unwrap_or("—"),
+        d.used.as_deref().unwrap_or("—"),
+        d.free.as_deref().unwrap_or("—"),
+        d.mount.unwrap_or("—"),
+    ));
+
+    let next_prefix = if depth > 0 {
+        if is_last {
+            format!("{}    ", prefix)
         } else {
-            format!("{prefix}│   ")
-        };
+            format!("{}│   ", prefix)
+        }
+    } else {
+        "".to_string()
+    };
 
-        append_children(out, d.children, &next_prefix);
+    let children = d.children;
+    let children_len = children.len();
+    for (i, child) in children.iter().enumerate() {
+        let child_is_last = i + 1 == children_len;
+        append_device_rows(out, child, depth + 1, child_is_last, &next_prefix);
     }
+}
+
+fn format_device_info(dev: &Device) -> String {
+    let mut out = String::new();
+
+    let name = &dev.name;
+    let path = dev.path.as_deref().unwrap_or("—");
+    let label = dev.label.as_deref().unwrap_or("—");
+    let uuid = dev.uuid.as_deref().unwrap_or("—");
+    let fstype = dev.fstype.as_deref().unwrap_or("—");
+    let size = dev.size.as_deref().unwrap_or("—");
+    let mountpoint = dev.mountpoint.as_deref().unwrap_or("—");
+    let is_sys = if is_system_device(dev) {
+        "**Yes** (Protected)"
+    } else {
+        "No"
+    };
+
+    let used_val = dev.fsused.as_deref().unwrap_or("—");
+    let usage_pct = dev.fsuse_percent.as_deref().unwrap_or("");
+    let used_str = if usage_pct.is_empty() {
+        used_val.to_string()
+    } else {
+        format!("{used_val} ({usage_pct})")
+    };
+    let avail_str = dev.fsavail.as_deref().unwrap_or("—");
+
+    out.push_str("| Property | Value |\n");
+    out.push_str("|---|---|\n");
+    out.push_str(&format!("| **Device Name** | `{name}` |\n"));
+    out.push_str(&format!("| **Device Path** | `{path}` |\n"));
+    out.push_str(&format!("| **Label** | **{label}** |\n"));
+    out.push_str(&format!("| **UUID** | `{uuid}` |\n"));
+    out.push_str(&format!("| **Filesystem** | `{fstype}` |\n"));
+    out.push_str(&format!("| **Total Size** | {size} |\n"));
+    out.push_str(&format!("| **Used Space** | {used_str} |\n"));
+    out.push_str(&format!("| **Available Space** | {avail_str} |\n"));
+    out.push_str(&format!("| **Mount Point** | `{mountpoint}` |\n"));
+    out.push_str(&format!("| **System Partition** | {is_sys} |\n"));
+
+    if !dev.children.is_empty() {
+        out.push_str("\n#### Partitions / Sub-devices\n\n");
+        out.push_str("| Name | Label | FS | Size | Mount Point |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for child in &dev.children {
+            out.push_str(&format!(
+                "| `{}` | {} | `{}` | {} | `{}` |\n",
+                child.name,
+                child.label.as_deref().unwrap_or("—"),
+                child.fstype.as_deref().unwrap_or("—"),
+                child.size.as_deref().unwrap_or("—"),
+                child.mountpoint.as_deref().unwrap_or("—")
+            ));
+        }
+    }
+
+    out
 }
 
 fn build_mount_path(dev: &Device, custom_point: Option<&str>) -> String {
@@ -377,7 +447,7 @@ async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
         .await?;
 
     if !status.success() {
-        return Err(Error::Custom(str!("Failed to install '{}'.", repair.tool)).into());
+        return Err(Error::Custom(str!("Failed to install `{}`.", repair.tool)).into());
     }
 
     Ok(())
@@ -430,7 +500,7 @@ async fn install_package(package: &str) -> Result<()> {
             return Ok(());
         }
 
-        return Err(Error::Custom(str!("Failed to install '{}'.", package)).into());
+        return Err(Error::Custom(str!("Failed to install `{}`.", package)).into());
     }
 
     Err(Error::Custom(str!("Unsupported package manager.")).into())
@@ -442,7 +512,7 @@ async fn perform_unmount(target: &str) -> Result<String> {
 
     if is_system_device(&dev) {
         return Err(Error::Custom(format!(
-            "Access denied: '{target}' contains current OS system partitions."
+            "Access denied: `{target}` contains current OS system partitions."
         ))
         .into());
     }
@@ -450,7 +520,7 @@ async fn perform_unmount(target: &str) -> Result<String> {
     let mountpoint = match dev.mountpoint.clone() {
         Some(mp) => mp,
         None => {
-            return Err(Error::Custom(format!("Device '{}' is not mounted.", target)).into());
+            return Err(Error::Custom(format!("Device `{}` is not mounted.", target)).into());
         }
     };
 
@@ -470,11 +540,11 @@ async fn perform_unmount(target: &str) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if stderr.contains("not mounted") {
-            return Err(Error::Custom(format!("Device '{}' is not mounted.", target)).into());
+            return Err(Error::Custom(format!("Device `{}` is not mounted.", target)).into());
         }
 
         return Err(
-            Error::Custom(format!("Failed to unmount '{}': {}", target, stderr.trim())).into(),
+            Error::Custom(format!("Failed to unmount `{}`: {}", target, stderr.trim())).into(),
         );
     }
 
@@ -488,7 +558,7 @@ async fn perform_unmount(target: &str) -> Result<String> {
     }
 
     Ok(format!(
-        "Successfully unmounted '{dev_path}' from '{mountpoint}'."
+        "Successfully unmounted `{dev_path}` from `{mountpoint}`."
     ))
 }
 
@@ -498,7 +568,7 @@ async fn perform_repair(target: &str) -> Result<String> {
 
     if is_system_device(&dev) {
         return Err(Error::Custom(format!(
-            "Access denied: Cannot run repair on system device '{target}'."
+            "Access denied: Cannot run repair on system device `{target}`."
         ))
         .into());
     }
@@ -539,7 +609,7 @@ async fn perform_repair(target: &str) -> Result<String> {
         },
         Some(fs) => {
             return Err(
-                Error::Custom(str!("Automatic repair for '{}' is not supported.", fs)).into(),
+                Error::Custom(str!("Automatic repair for `{}` is not supported.", fs)).into(),
             );
         }
         None => {
@@ -598,13 +668,13 @@ async fn perform_repair(target: &str) -> Result<String> {
         });
 
         match remount_result {
-            Ok(_) => mount_msg = format!(" and remounted at '{target_mount}'"),
-            Err(_) => mount_msg = format!(", but failed to remount at '{target_mount}'"),
+            Ok(_) => mount_msg = format!(" and remounted at `{target_mount}`"),
+            Err(_) => mount_msg = format!(", but failed to remount at `{target_mount}`"),
         }
     }
 
     Ok(format!(
-        "Filesystem on '{dev_path}' successfully repaired{mount_msg}."
+        "Filesystem on `{dev_path}` successfully repaired{mount_msg}."
     ))
 }
 
@@ -622,6 +692,23 @@ pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+#[log(target = %action.target)]
+pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let dev = find(&action.target).await?;
+        let msg = format_device_info(&dev);
+        info!("Disk info fetched for target {}", action.target);
+        tx.send(Event::Answer(msg))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(Error::UnsupportedOS.into())
     }
 }
 
@@ -647,20 +734,18 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
         };
 
         if let Some(mount) = dev.mountpoint.as_deref() {
-            let msg = format!("Device '{dev_path}' is already mounted at '{mount}'.");
+            let msg = format!("Device `{dev_path}` is already mounted at `{mount}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
-            return Ok(());
         }
 
         let mount_path = build_mount_path(&dev, action.point.as_deref());
 
         // 1. RW attempt
         if try_mount_rw(dev_path, &mount_path).await.is_ok() {
-            let msg = format!("Mounted '{dev_path}' at '{mount_path}'.");
+            let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
-            return Ok(());
         }
 
         // 2. Automatic repair
@@ -668,18 +753,16 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
 
         // 3. Retry RW
         if try_mount_rw(dev_path, &mount_path).await.is_ok() {
-            let msg = format!("Mounted '{dev_path}' at '{mount_path}' after repair.");
+            let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
-            return Ok(());
         }
 
         // 4. Fallback RO
         if try_mount_ro(dev_path, &mount_path).await.is_ok() {
-            let msg = format!("Mounted '{dev_path}' read-only at '{mount_path}'.");
+            let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
-            return Ok(());
         }
 
         Err(Error::Custom(str!("Failed to mount device after repair attempts.")).into())
@@ -814,11 +897,11 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
             .await?;
         if !status.success() {
             return Err(
-                Error::Custom(format!("Failed to format '{dev_path}' as {}", action.fs)).into(),
+                Error::Custom(format!("Failed to format `{dev_path}` as {}", action.fs)).into(),
             );
         }
 
-        let msg = format!("Successfully formatted '{dev_path}' as {}.", action.fs);
+        let msg = format!("Successfully formatted `{dev_path}` as {}.", action.fs);
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())

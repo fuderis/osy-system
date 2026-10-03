@@ -68,7 +68,7 @@ pub enum SkillKind {
         description = "Disk management (list, mount, unmount, format).",
         prompt = "You can safely run the necessary commands - the user will still receive a prompt for confirmation."
     )]
-    #[tools("list", "mount", "unmount", "repair", "format")]
+    #[tools("list", "info", "mount", "unmount", "repair", "format")]
     Disk,
 
     #[skill(
