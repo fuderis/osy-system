@@ -1,13 +1,16 @@
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    utils::{self, SshConnection},
+};
 
 use anylm::{Schema, api::Tool};
-use atoman::fs;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use russh::{
-    client::{self, Config, Handler},
-    keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate},
+use atoman::{
+    Command, fs,
+    io::{AsyncBufReadExt, BufReader},
 };
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use russh_keys::ssh_key::rand_core::OsRng;
+use std::process::Stdio;
 
 pub fn tools_list() -> Vec<Tool> {
     vec![
@@ -26,6 +29,18 @@ pub fn tools_list() -> Vec<Tool> {
         Tool::typed::<SyncConfigAction>(
             "sync",
             "Synchronizes editor configurations (Helix, Neovim, Vim) between local machine and VPS.",
+        ),
+        Tool::typed::<PingAction>(
+            "ping",
+            "Measures round-trip latency to a target host using ICMP echo requests.",
+        ),
+        Tool::typed::<TraceAction>(
+            "trace",
+            "Traces the layer-3 network path/hops to a remote host.",
+        ),
+        Tool::typed::<RouteAction>(
+            "route",
+            "Performs continuous network route quality analysis using MTR.",
         ),
     ]
 }
@@ -90,200 +105,32 @@ pub struct SyncConfigAction {
     pub identity_file: Option<String>,
 }
 
-// ============================================================================
-// RUSSH CLIENT HANDLER & HELPERS
-// ============================================================================
-
-struct SshClientHandler;
-
-impl Handler for SshClientHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &PublicKeyOrCertificate,
-    ) -> StdResult<bool, Self::Error> {
-        Ok(true)
-    }
+#[derive(Debug, Deserialize, Schema)]
+pub struct PingAction {
+    /// Target domain or IP address (e.g. 'example.com' or '8.8.8.8').
+    pub target: Option<String>,
+    /// Optional IP override if target is specified as domain name.
+    pub ip: Option<String>,
+    /// Number of ICMP echo requests to send (default: 4).
+    pub count: Option<usize>,
 }
 
-pub struct SshConnection {
-    session: client::Handle<SshClientHandler>,
+#[derive(Debug, Deserialize, Schema)]
+pub struct TraceAction {
+    /// Target domain or IP address.
+    pub target: Option<String>,
+    /// Optional IP override.
+    pub ip: Option<String>,
 }
 
-impl SshConnection {
-    pub async fn connect(host_str: &str, identity_file: Option<&str>) -> Result<Self> {
-        let (user, host, port) = parse_host_string(host_str)?;
-        let key_path = resolve_identity_file(identity_file)?;
-
-        let key_pair = russh::keys::load_secret_key(&key_path, None).map_err(|e| {
-            Error::Custom(format!(
-                "Failed to load SSH private key from {}: {e}",
-                key_path.display()
-            ))
-        })?;
-
-        let config = Arc::new(Config {
-            inactivity_timeout: Some(Duration::from_secs(30)),
-            ..Default::default()
-        });
-
-        let addr = format!("{host}:{port}");
-        let mut session = client::connect(config, addr, SshClientHandler)
-            .await
-            .map_err(|e| Error::Custom(format!("SSH connection to {host}:{port} failed: {e}")))?;
-
-        let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
-        let auth_res = session.authenticate_publickey(user, key_with_alg).await?;
-
-        if !auth_res.success() {
-            return Err(
-                Error::Custom("SSH authentication rejected by remote server".into()).into(),
-            );
-        }
-
-        Ok(Self { session })
-    }
-
-    pub async fn exec(&mut self, command: &str) -> Result<String> {
-        let mut channel = self
-            .session
-            .channel_open_session()
-            .await
-            .map_err(|e| Error::Custom(format!("Failed to open SSH channel: {e}")))?;
-
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|e| Error::Custom(format!("Failed to exec command over SSH: {e}")))?;
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                russh::ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                russh::ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
-                _ => {}
-            }
-        }
-
-        let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-        let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-
-        if !stderr_str.is_empty() && stdout_str.is_empty() {
-            return Err(Error::Custom(format!("SSH Command failed: {}", stderr_str.trim())).into());
-        }
-
-        Ok(stdout_str)
-    }
-}
-
-fn parse_host_string(raw: &str) -> Result<(String, String, u16)> {
-    let mut user = "root".to_string();
-    let mut host_port = raw.trim();
-
-    if let Some((u, hp)) = host_port.split_once('@') {
-        user = u.to_string();
-        host_port = hp;
-    }
-
-    let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
-        let port_num = p
-            .parse::<u16>()
-            .map_err(|_| Error::Custom(format!("Invalid port in host string: {p}")))?;
-        (h.to_string(), port_num)
-    } else {
-        (host_port.to_string(), 22)
-    };
-
-    if host.is_empty() {
-        return Err(Error::Custom("Host address cannot be empty".into()).into());
-    }
-
-    Ok((user, host, port))
-}
-
-fn resolve_identity_file(override_path: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = override_path {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return Ok(expand_home(trimmed));
-        }
-    }
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| Error::Custom("Could not resolve home directory".into()))?;
-
-    let ssh_dir = PathBuf::from(home).join(".ssh");
-    let ed25519 = ssh_dir.join("id_ed25519");
-
-    if ed25519.exists() {
-        Ok(ed25519)
-    } else {
-        let rsa = ssh_dir.join("id_rsa");
-        if rsa.exists() {
-            Ok(rsa)
-        } else {
-            // Default to ed25519 to produce a clear error message on key load failure
-            Ok(ed25519)
-        }
-    }
-}
-
-fn generate_nonce() -> u16 {
-    rand::random::<u16>()
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    if path.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-            return PathBuf::from(path.replacen('~', &home, 1));
-        }
-    }
-    PathBuf::from(path)
-}
-
-fn resolve_host(override_host: Option<&str>) -> Result<String> {
-    if let Some(h) = override_host {
-        let trimmed = h.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-
-    std::env::var("DEFAULT_VPS_HOST").map_err(|_| {
-        Error::Custom("Expected host name or DEFAULT_VPS_HOST env variable.".into()).into()
-    })
-}
-
-fn get_editor_paths(editor: &str) -> Result<(&'static str, &'static str)> {
-    match editor {
-        "helix" => Ok((".config/helix", ".config/helix")),
-        "neovim" => Ok((".config/nvim", ".config/nvim")),
-        "vim" => Ok((".vimrc", ".vimrc")),
-        _ => Err(Error::Custom("Unsupported editor".into()).into()),
-    }
-}
-
-async fn upload_pubkey_to_vps(conn: &mut SshConnection, user: &str, pubkey: &str) -> Result<()> {
-    let clean_pubkey = pubkey.trim();
-    let target_dir = if user == "root" {
-        "/root/.ssh".to_string()
-    } else {
-        format!("/home/{user}/.ssh")
-    };
-
-    let cmd = format!(
-        "sudo mkdir -p {target_dir} && \
-         echo '{clean_pubkey}' | sudo tee -a {target_dir}/authorized_keys > /dev/null && \
-         (id -u {user} >/dev/null 2>&1 && sudo chown -R {user}:{user} {target_dir} || true) && \
-         sudo chmod 700 {target_dir} && \
-         sudo chmod 600 {target_dir}/authorized_keys"
-    );
-    conn.exec(&cmd).await?;
-    Ok(())
+#[derive(Debug, Deserialize, Schema)]
+pub struct RouteAction {
+    /// Target domain or IP address.
+    pub target: Option<String>,
+    /// Optional IP override.
+    pub ip: Option<String>,
+    /// Number of MTR cycles (default: 10).
+    pub count: Option<usize>,
 }
 
 // ============================================================================
@@ -292,31 +139,104 @@ async fn upload_pubkey_to_vps(conn: &mut SshConnection, user: &str, pubkey: &str
 
 #[log()]
 pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
-    let host = resolve_host(action.host.as_deref())?;
+    let host = utils::resolve_host(action.host.as_deref())?;
 
+    tx.send(Event::Thinking(format!(
+        "Connecting to `{host}` via SSH..."
+    )))?;
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
-    let cmd = "echo '=== SYSTEM INFO ===' && (lsb_release -d 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME) && uptime && \
-               echo '\n=== CPU & RAM ===' && free -h && \
-               echo '\n=== DISK USAGE ===' && df -h / && \
-               echo '\n=== FAILED SERVICES ===' && (systemctl --failed --plain --no-legend 2>/dev/null || echo 'N/A')";
-    let output = conn.exec(cmd).await?;
+    tx.send(Event::Thinking(
+        "Fetching OS info, uptime, and load average...".into(),
+    ))?;
+    let os = conn
+        .exec("(lsb_release -d 2>/dev/null | cut -f2- || grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '\"')")
+        .await?;
 
-    info!("Received system info for host: `{host}`.");
-    tx.send(Event::Answer(output))?;
+    let uptime = conn
+        .exec("uptime -p 2>/dev/null | sed 's/^up //' || echo unknown")
+        .await?;
+
+    let load_avg = conn
+        .exec("uptime | awk -F'load average:' '{print $2}'")
+        .await?;
+
+    tx.send(Event::Thinking("Fetching memory and disk usage...".into()))?;
+    let ram = conn
+        .exec("free -h | awk '/^Mem:/ {printf \"%s / %s\", $3, $2}'")
+        .await?;
+
+    let ram_avail = conn.exec("free -h | awk '/^Mem:/ {print $7}'").await?;
+
+    let swap = conn
+        .exec("free -h | awk '/^Swap:/ {printf \"%s / %s\", $3, $2}'")
+        .await?;
+
+    let disk = conn
+        .exec("df -h / | awk 'NR==2 {printf \"%s / %s (%s)\", $3, $2, $5}'")
+        .await?;
+
+    tx.send(Event::Thinking(
+        "Checking failed systemd services...".into(),
+    ))?;
+    let failed_raw = conn
+        .exec("systemctl --failed --plain --no-legend 2>/dev/null || true")
+        .await?;
+
+    let failed = if failed_raw.trim().is_empty() {
+        "None".to_string()
+    } else {
+        failed_raw
+            .lines()
+            .map(|l| l.split_whitespace().next().unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    tx.send(Event::Thinking("Composing system info table...".into()))?;
+    let table = format!(
+        "## System Info for `{host}`\n\n\
+         | Parameter | Value |\n\
+         |:----------|:------|\n\
+         | OS | {} |\n\
+         | Uptime | {} |\n\
+         | Load average | {} |\n\
+         | RAM (used / total) | {} |\n\
+         | RAM available | {} |\n\
+         | Swap (used / total) | {} |\n\
+         | Disk (used / total) | {} |\n\
+         | Failed services | {} |\n",
+        os.trim(),
+        uptime.trim(),
+        load_avg.trim(),
+        ram.trim(),
+        ram_avail.trim(),
+        swap.trim(),
+        disk.trim(),
+        failed,
+    );
+
+    tx.send(Event::Answer(table))?;
+    info!("Fetched system info for host '{host}'.");
 
     Ok(())
 }
 
 #[log()]
 pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
-    let host = resolve_host(action.host.as_deref())?;
+    let host = utils::resolve_host(action.host.as_deref())?;
     let identity = action.identity_file.as_deref();
 
+    tx.send(Event::Thinking(format!(
+        "Connecting to `{host}` via SSH for user management..."
+    )))?;
     let mut conn = SshConnection::connect(&host, identity).await?;
 
     match action.action.as_str() {
         "list" => {
+            tx.send(Event::Thinking(
+                "Fetching user list from /etc/passwd...".into(),
+            ))?;
             let cmd = "awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd";
             let output = conn.exec(cmd).await?;
             tx.send(Event::Answer(format!(
@@ -335,6 +255,9 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
 
+            tx.send(Event::Thinking(format!(
+                "Creating user `{user}` on `{host}`..."
+            )))?;
             let mut cmd = format!("sudo useradd -m -s /bin/bash '{user}'");
             if action.sudo.unwrap_or(false) {
                 cmd.push_str(&format!(" && sudo usermod -aG sudo '{user}'"));
@@ -367,6 +290,9 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
             };
 
             if matches!(confirmation, Some(Confirmation::Yes)) {
+                tx.send(Event::Thinking(format!(
+                    "Killing active sessions and removing user `{user}` from `{host}`..."
+                )))?;
                 let cleanup_cmd = format!(
                     "sudo pkill -u '{user}' || true; \
                      sudo systemctl stop user@{user}.service || true; \
@@ -391,7 +317,10 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 .pubkey
                 .ok_or_else(|| Error::Custom("Missing pubkey parameter".into()))?;
 
-            upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
+            tx.send(Event::Thinking(format!(
+                "Uploading SSH public key for user `{user}` on `{host}`..."
+            )))?;
+            utils::upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
             tx.send(Event::Answer(format!("SSH key added for user `{user}`.")))?;
         }
 
@@ -403,8 +332,12 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
             let raw_path = action
                 .key_path
                 .ok_or_else(|| Error::Custom("Missing key_path parameter".into()))?;
-            let path = expand_home(&raw_path);
+            let path = utils::expand_home(&raw_path);
 
+            tx.send(Event::Thinking(format!(
+                "Reading public key from `{}`...",
+                path.display()
+            )))?;
             let pubkey = fs::read_to_string(&path).await.map_err(|e| {
                 Error::Custom(format!(
                     "Failed to read public key file `{}`: {e}",
@@ -412,7 +345,11 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 ))
             })?;
 
-            upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
+            tx.send(Event::Thinking(format!(
+                "Uploading SSH key from `{}` for user `{user}` on `{host}`...",
+                path.display()
+            )))?;
+            utils::upload_pubkey_to_vps(&mut conn, user, &pubkey).await?;
             tx.send(Event::Answer(format!(
                 "SSH key from `{}` uploaded for user `{user}`.",
                 path.display()
@@ -425,7 +362,9 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
 
-            // Generate ED25519 Private Key via ssh_key / russh_keys
+            tx.send(Event::Thinking(
+                "Generating ED25519 keypair via russh...".into(),
+            ))?;
             let private_key =
                 russh_keys::PrivateKey::random(&mut OsRng, russh_keys::Algorithm::Ed25519)
                     .map_err(|e| {
@@ -438,18 +377,20 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
             let ssh_dir = PathBuf::from(home).join(".ssh");
             fs::create_dir_all(&ssh_dir).await?;
 
-            let nonce = generate_nonce();
+            let nonce = utils::generate_nonce();
             let key_name = format!("{user}@{host}_{nonce}");
             let priv_key_path = ssh_dir.join(&key_name);
             let pub_key_path = ssh_dir.join(format!("{key_name}.pub"));
 
-            // Write private key (PEM encoded PKCS#8)
+            tx.send(Event::Thinking(format!(
+                "Saving keypair to `{}`...",
+                ssh_dir.display()
+            )))?;
             let mut priv_file = std::fs::File::create(&priv_key_path)
                 .map_err(|e| Error::Custom(format!("Failed to create private key file: {e}")))?;
             russh_keys::encode_pkcs8_pem(&private_key, &mut priv_file)
                 .map_err(|e| Error::Custom(format!("Failed to write private key to file: {e}")))?;
 
-            // Format OpenSSH public key line
             let public_key = private_key.public_key();
             let pubkey_str = public_key
                 .to_openssh()
@@ -457,7 +398,10 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
 
             fs::write(&pub_key_path, format!("{pubkey_str} {user}@{host}\n")).await?;
 
-            upload_pubkey_to_vps(&mut conn, user, &pubkey_str).await?;
+            tx.send(Event::Thinking(format!(
+                "Authorizing public key for user `{user}` on `{host}`..."
+            )))?;
+            utils::upload_pubkey_to_vps(&mut conn, user, &pubkey_str).await?;
 
             tx.send(Event::Answer(format!(
                 "Generated ED25519 keypair via russh:\n\
@@ -478,6 +422,11 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 .sudo
                 .ok_or_else(|| Error::Custom("Missing 'sudo' boolean parameter".into()))?;
 
+            let action_str = if grant { "Granting" } else { "Revoking" };
+            tx.send(Event::Thinking(format!(
+                "{action_str} sudo privileges for user `{user}` on `{host}`..."
+            )))?;
+
             let cmd = if grant {
                 format!("sudo usermod -aG sudo '{user}'")
             } else {
@@ -488,27 +437,37 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
             let status_str = if grant { "granted to" } else { "revoked from" };
             let msg = format!("Sudo privileges {status_str} user `{user}`.");
 
-            info!("{msg}");
             tx.send(Event::Answer(msg))?;
         }
 
         _ => return Err(Error::Custom("Invalid user action.".into()).into()),
     }
 
+    info!(
+        "Completed user action '{}' for host '{host}'.",
+        action.action
+    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Result<()> {
-    let host = resolve_host(action.host.as_deref())?;
+    let host = utils::resolve_host(action.host.as_deref())?;
 
+    tx.send(Event::Thinking(format!(
+        "Connecting to `{host}` via SSH for file transfer..."
+    )))?;
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
-    let local_path = expand_home(&action.local_path);
+    let local_path = utils::expand_home(&action.local_path);
     let remote_path = action.remote_path.as_str();
 
     match action.direction.as_str() {
         "upload" => {
+            tx.send(Event::Thinking(format!(
+                "Reading local file `{}`...",
+                local_path.display()
+            )))?;
             let content = fs::read(&local_path).await.map_err(|e| {
                 Error::Custom(format!(
                     "Failed to read local file `{}`: {e}",
@@ -516,7 +475,10 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Resul
                 ))
             })?;
 
-            // write file directly via SSH using base64 stream (safe for binary files)
+            tx.send(Event::Thinking(format!(
+                "Encoding and uploading `{}` to `{remote_path}` on `{host}`...",
+                local_path.display()
+            )))?;
             let encoded = BASE64.encode(content);
             let cmd = format!(
                 "mkdir -p $(dirname '{remote_path}') && echo '{encoded}' | base64 -d > '{remote_path}'"
@@ -530,10 +492,17 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Resul
         }
 
         "download" => {
+            tx.send(Event::Thinking(format!(
+                "Downloading `{remote_path}` from `{host}`..."
+            )))?;
             let cmd = format!("base64 '{remote_path}'");
             let output = conn.exec(&cmd).await?;
             let clean_b64 = output.replace(['\r', '\n'], "");
 
+            tx.send(Event::Thinking(format!(
+                "Decoding and saving to `{}`...",
+                local_path.display()
+            )))?;
             let decoded = BASE64.decode(clean_b64).map_err(|e| {
                 Error::Custom(format!(
                     "Failed to decode base64 file data from remote: {e}"
@@ -553,27 +522,44 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Resul
         _ => return Err(Error::Custom("Invalid direction. Use upload/download".into()).into()),
     }
 
+    info!(
+        "Completed file transfer ({}) for host '{host}'.",
+        action.direction
+    );
     Ok(())
 }
 
 #[log()]
 pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<()> {
-    let host = resolve_host(action.host.as_deref())?;
+    let host = utils::resolve_host(action.host.as_deref())?;
 
+    tx.send(Event::Thinking(format!(
+        "Connecting to `{host}` via SSH for config sync..."
+    )))?;
     let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
 
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
 
-    let (local_rel, remote_rel) = get_editor_paths(&action.editor)?;
+    let (local_rel, remote_rel) = utils::get_editor_paths(&action.editor)?;
     let local_full = PathBuf::from(home).join(local_rel);
 
     match action.direction.as_str() {
         "push" => {
+            tx.send(Event::Thinking(format!(
+                "Reading local `{}` config from `{}`...",
+                action.editor,
+                local_full.display()
+            )))?;
             if local_full.is_file() {
                 let content = fs::read(&local_full).await?;
                 let encoded = BASE64.encode(content);
+
+                tx.send(Event::Thinking(format!(
+                    "Pushing `{}` config to `{host}`...",
+                    action.editor
+                )))?;
                 let cmd = format!(
                     "mkdir -p $(dirname '~/{remote_rel}') && echo '{encoded}' | base64 -d > '~/{remote_rel}'"
                 );
@@ -588,10 +574,19 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
         }
 
         "pull" => {
+            tx.send(Event::Thinking(format!(
+                "Pulling `{}` config from `{host}`...",
+                action.editor,
+            )))?;
             let cmd = format!("base64 '~/{remote_rel}'");
             let output = conn.exec(&cmd).await?;
             let clean_b64 = output.replace(['\r', '\n'], "");
 
+            tx.send(Event::Thinking(format!(
+                "Decoding and saving `{}` config to `{}`...",
+                action.editor,
+                local_full.display()
+            )))?;
             let decoded = BASE64
                 .decode(clean_b64)
                 .map_err(|e| Error::Custom(format!("Failed to decode remote config file: {e}")))?;
@@ -609,8 +604,251 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
         "Successfully synchronized `{}` config (`{}`) with `{host}`.",
         action.editor, action.direction
     );
-    info!("{msg}");
     tx.send(Event::Answer(msg))?;
 
+    info!(
+        "Completed config sync for editor '{}' ({}) with host '{host}'.",
+        action.editor, action.direction
+    );
+    Ok(())
+}
+
+#[log()]
+pub async fn handle_ping(tx: Sender<Bytes>, action: PingAction) -> Result<()> {
+    let target = utils::resolve_host_target(&action.target, &action.ip)?;
+    let count = action.count.unwrap_or(4);
+
+    tx.send(Event::Thinking(format!(
+        "Executing ICMP ping to `{target}` ({count} packets)..."
+    )))?;
+
+    let mut child = Command::new("ping")
+        .args(["-c", &count.to_string(), &target])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Custom(format!("Failed to execute ping command: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Custom("Failed to capture stdout for ping".into()))?;
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut row_count = 0;
+    let mut stats = Vec::new();
+    let mut raw_lines = Vec::new();
+
+    tx.send(Event::Answer(format!(
+        "## ICMP Ping Results for `{target}`\n\n| Seq | TTL | Time | Status |\n|:---:|:---:|:----:|:------:|\n"
+    )))?;
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.contains("bytes from") {
+            let seq = trimmed
+                .split("icmp_seq=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("-");
+            let ttl = trimmed
+                .split("ttl=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("-");
+            let time = trimmed
+                .split("time=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("-");
+
+            row_count += 1;
+            tx.send(Event::Answer(format!(
+                "| `{seq}` | `{ttl}` | `{time} ms` | OK |\n"
+            )))?;
+        } else if trimmed.contains("packet loss")
+            || trimmed.contains("rtt")
+            || trimmed.contains("round-trip")
+        {
+            stats.push(trimmed.to_string());
+        } else if !trimmed.is_empty() && !trimmed.starts_with("PING ") {
+            raw_lines.push(trimmed.to_string());
+        }
+    }
+
+    if row_count == 0 && !raw_lines.is_empty() {
+        let raw_md = format!("\n```text\n{}\n```\n", raw_lines.join("\n"));
+        tx.send(Event::Answer(raw_md))?;
+    }
+
+    if !stats.is_empty() {
+        let mut stats_md = String::from("\n");
+        for stat in stats {
+            stats_md.push_str(&format!("`{stat}`\n"));
+        }
+        tx.send(Event::Answer(stats_md))?;
+    }
+
+    info!("Executed ping to '{target}'.");
+    Ok(())
+}
+
+#[log()]
+pub async fn handle_trace(tx: Sender<Bytes>, action: TraceAction) -> Result<()> {
+    let target = utils::resolve_host_target(&action.target, &action.ip)?;
+
+    tx.send(Event::Thinking(format!(
+        "Checking for `traceroute` availability..."
+    )))?;
+    if Command::new("traceroute").arg("-V").output().await.is_err() {
+        utils::install_dependency("traceroute", &tx).await?;
+    }
+
+    tx.send(Event::Thinking(format!(
+        "Tracing layer-3 network route to `{target}`..."
+    )))?;
+
+    let mut child = Command::new("traceroute")
+        .arg(&target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Custom(format!("Failed to execute traceroute: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Custom("Failed to capture stdout for traceroute".into()))?;
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut row_count = 0;
+    let mut raw_lines = Vec::new();
+
+    tx.send(Event::Answer(format!(
+        "## Traceroute for `{target}`\n\n| Hop | Node & Latency | Status |\n|:---:|:---------------|:------:|\n"
+    )))?;
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("traceroute to") {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        if let Some(hop_str) = parts.next() {
+            if hop_str.parse::<u32>().is_ok() {
+                let rest: Vec<&str> = parts.collect();
+                let row = if rest.iter().all(|&s| s == "*") {
+                    format!("| `{hop_str}` | `* * *` | Timeout |\n")
+                } else {
+                    let details = rest.join(" ");
+                    format!("| `{hop_str}` | `{details}` | OK |\n")
+                };
+                row_count += 1;
+                tx.send(Event::Answer(row))?;
+                continue;
+            }
+        }
+        raw_lines.push(trimmed.to_string());
+    }
+
+    if row_count == 0 && !raw_lines.is_empty() {
+        let raw_md = format!("\n```text\n{}\n```\n", raw_lines.join("\n"));
+        tx.send(Event::Answer(raw_md))?;
+    }
+
+    info!("Executed traceroute to '{target}'.");
+    Ok(())
+}
+
+#[log()]
+pub async fn handle_route(tx: Sender<Bytes>, action: RouteAction) -> Result<()> {
+    let target = utils::resolve_host_target(&action.target, &action.ip)?;
+    let count = action.count.unwrap_or(10);
+
+    tx.send(Event::Thinking(format!(
+        "Checking for `mtr` availability..."
+    )))?;
+    if Command::new("mtr").arg("--version").output().await.is_err() {
+        utils::install_dependency("mtr", &tx).await?;
+    }
+
+    tx.send(Event::Thinking(format!(
+        "Running MTR network quality analysis for `{target}` ({count} cycles)..."
+    )))?;
+
+    let mut mtr_cmd = Command::new("mtr");
+
+    #[cfg(target_os = "linux")]
+    {
+        mtr_cmd.args(["-rwzc", &count.to_string(), &target]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        mtr_cmd.args(["-rc", &count.to_string(), &target]);
+    }
+
+    let mut child = mtr_cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Custom(format!("Failed to execute mtr: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Custom("Failed to capture stdout for mtr".into()))?;
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut row_count = 0;
+    let mut raw_lines = Vec::new();
+
+    tx.send(Event::Answer(format!(
+        "## MTR Route Analysis for `{target}`\n\n| Host / Hop | Loss% | Sent | Last | Avg | Best | Worst | StDev |\n|:-----------|:-----:|:----:|:----:|:---:|:----:|:-----:|:-----:|\n"
+    )))?;
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.contains("HOST:") || trimmed.starts_with("Start:") {
+            continue;
+        }
+
+        if trimmed.contains("|--") || trimmed.contains("|  ") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let host_name = parts[0..parts.len() - 7]
+                    .join(" ")
+                    .replace("|--", "")
+                    .replace("|", "")
+                    .trim()
+                    .to_string();
+                let loss = parts[parts.len() - 7];
+                let snt = parts[parts.len() - 6];
+                let last = parts[parts.len() - 5];
+                let avg = parts[parts.len() - 4];
+                let best = parts[parts.len() - 3];
+                let wrst = parts[parts.len() - 2];
+                let stdev = parts[parts.len() - 1];
+
+                let row = format!(
+                    "| `{host_name}` | `{loss}` | `{snt}` | `{last}` | `{avg}` | `{best}` | `{wrst}` | `{stdev}` |\n"
+                );
+                row_count += 1;
+                tx.send(Event::Answer(row))?;
+                continue;
+            }
+        }
+        if !trimmed.is_empty() {
+            raw_lines.push(trimmed.to_string());
+        }
+    }
+
+    if row_count == 0 && !raw_lines.is_empty() {
+        let raw_md = format!("\n```text\n{}\n```\n", raw_lines.join("\n"));
+        tx.send(Event::Answer(raw_md))?;
+    }
+
+    info!("Executed MTR route analysis to '{target}'.");
     Ok(())
 }

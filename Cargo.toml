@@ -16,7 +16,7 @@
 [package]
 name = "osy-system"
 description = "Local system management agent — provides system metrics, appearance changing, power & media control, disks & infrastructure management."
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 
 [dependencies]

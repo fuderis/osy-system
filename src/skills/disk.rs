@@ -1,4 +1,7 @@
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    utils::{self, Device},
+};
 
 use anylm::{Schema, api::Tool};
 use atoman::process::Command;
@@ -73,32 +76,8 @@ pub struct FormatAction {
 }
 
 // ============================================================================
-// DATA STRUCTURES (lsblk)
+// DISPLAY STRUCTURES & HELPERS
 // ============================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct Output {
-    #[serde(rename = "blockdevices")]
-    pub devices: Vec<Device>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Device {
-    pub name: String,
-    pub path: Option<String>,
-    pub label: Option<String>,
-    pub uuid: Option<String>,
-    pub fstype: Option<String>,
-    pub size: Option<String>,
-    pub mountpoint: Option<String>,
-    #[serde(default)]
-    pub children: Vec<Device>,
-    pub fsused: Option<String>,
-    #[serde(rename = "fsavail")]
-    pub fsavail: Option<String>,
-    #[serde(rename = "fsuse%")]
-    pub fsuse_percent: Option<String>,
-}
 
 struct DisplayDevice<'a> {
     name: &'a str,
@@ -114,77 +93,6 @@ struct DisplayDevice<'a> {
 struct ToolPkg {
     tool: &'static str,
     package: &'static str,
-}
-
-// ============================================================================
-// INTERNAL HELPERS
-// ============================================================================
-
-pub async fn list() -> Result<Vec<Device>> {
-    #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("lsblk")
-            .args(["--json", "-O"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            return Err(str!("lsblk failed").into());
-        }
-
-        let output: Output = serde_json::from_slice(&output.stdout)?;
-        Ok(output.devices)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedOS.into())
-    }
-}
-
-pub async fn find(name: &str) -> Result<Device> {
-    let devices = list().await?;
-
-    find_recursive(&devices, name)
-        .cloned()
-        .ok_or(str!("Device '{name}' not found").into())
-}
-
-fn find_recursive<'a>(devices: &'a [Device], target: &str) -> Option<&'a Device> {
-    for device in devices {
-        if device.path.as_deref() == Some(target)
-            || device.label.as_deref() == Some(target)
-            || device.uuid.as_deref() == Some(target)
-            || device.mountpoint.as_deref() == Some(target)
-            || device.name == target
-        {
-            return Some(device);
-        }
-
-        if let Some(found) = find_recursive(&device.children, target) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Checks if the device or any of its child partitions are root/system mounts (`/` or `/boot`).
-fn is_system_device(dev: &Device) -> bool {
-    if let Some(ref mp) = dev.mountpoint {
-        if mp == "/" || mp.starts_with("/boot") {
-            return true;
-        }
-    }
-
-    for child in &dev.children {
-        if is_system_device(child) {
-            return true;
-        }
-    }
-
-    false
 }
 
 fn display_device(dev: &Device) -> DisplayDevice<'_> {
@@ -269,17 +177,46 @@ fn append_device_rows(out: &mut String, dev: &Device, depth: usize, is_last: boo
         ""
     };
 
-    let name_field = format!("{}{}`{}`", prefix, branch, d.name);
+    let name_field = format!("{}{}{}", prefix, branch, d.name);
+    let is_parent = depth == 0;
 
     out.push_str(&format!(
-        "| {} | **{}** | `{}` | {} | {} | {} | `{}` |\n",
-        name_field,
-        d.label.unwrap_or("—"),
-        d.fstype.unwrap_or("—"),
-        d.size.unwrap_or("—"),
-        d.used.as_deref().unwrap_or("—"),
-        d.free.as_deref().unwrap_or("—"),
-        d.mount.unwrap_or("—"),
+        "| {} | {} | {} | {} | {} | {} | {} |\n",
+        if is_parent {
+            format!("**`{name_field}`**")
+        } else {
+            name_field
+        },
+        if !is_parent {
+            d.label.unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.fstype.map(|s| format!("`{s}`")).unwrap_or("—".into())
+        } else {
+            "".into()
+        },
+        if !is_parent {
+            d.size.unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.used.as_deref().unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.free.as_deref().unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.mount.map(|s| format!("`{s}`")).unwrap_or("—".into())
+        } else {
+            "".into()
+        },
     ));
 
     let next_prefix = if depth > 0 {
@@ -310,7 +247,7 @@ fn format_device_info(dev: &Device) -> String {
     let fstype = dev.fstype.as_deref().unwrap_or("—");
     let size = dev.size.as_deref().unwrap_or("—");
     let mountpoint = dev.mountpoint.as_deref().unwrap_or("—");
-    let is_sys = if is_system_device(dev) {
+    let is_sys = if utils::is_system_disk(dev) {
         "**Yes** (Protected)"
     } else {
         "No"
@@ -375,9 +312,9 @@ fn build_mount_path(dev: &Device, custom_point: Option<&str>) -> String {
 #[cfg(target_os = "linux")]
 async fn ensure_mount_dir(mount_path: &str) -> Result<()> {
     let status = Command::new("sudo")
-        .args(["mkdir", "-p", mount_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(["-n", "mkdir", "-p", mount_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
 
@@ -393,9 +330,9 @@ async fn try_mount_rw(dev_path: &str, mount_path: &str) -> Result<()> {
     ensure_mount_dir(mount_path).await?;
 
     let status = Command::new("sudo")
-        .args(["timeout", "15", "mount", dev_path, mount_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(["-n", "mount", dev_path, mount_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
 
@@ -411,9 +348,9 @@ async fn try_mount_ro(dev_path: &str, mount_path: &str) -> Result<()> {
     ensure_mount_dir(mount_path).await?;
 
     let status = Command::new("sudo")
-        .args(["timeout", "10", "mount", "-o", "ro", dev_path, mount_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(["-n", "mount", "-o", "ro", dev_path, mount_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
 
@@ -428,8 +365,8 @@ async fn try_mount_ro(dev_path: &str, mount_path: &str) -> Result<()> {
 async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
     let status = Command::new("sh")
         .args(["-c", &format!("command -v {}", repair.tool)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
 
@@ -437,12 +374,12 @@ async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
         return Ok(());
     }
 
-    install_package(repair.package).await?;
+    utils::install_package(repair.package).await?;
 
     let status = Command::new("sh")
         .args(["-c", &format!("command -v {}", repair.tool)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
 
@@ -454,63 +391,10 @@ async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-async fn install_package(package: &str) -> Result<()> {
-    let managers = [
-        (
-            "pacman",
-            vec!["pacman", "-Sy", "--needed", "--noconfirm", package],
-        ),
-        ("apt", vec!["apt", "install", "-y", package]),
-        ("dnf", vec!["dnf", "install", "-y", package]),
-        (
-            "zypper",
-            vec!["zypper", "--non-interactive", "install", package],
-        ),
-    ];
-
-    for (manager, args) in managers {
-        let exists = Command::new("sh")
-            .args(["-c", &format!("command -v {manager}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await?;
-
-        if !exists.success() {
-            continue;
-        }
-
-        if manager == "apt" {
-            let _ = Command::new("sudo")
-                .args(["apt", "update"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await?;
-        }
-
-        let status = Command::new("sudo")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await?;
-
-        if status.success() {
-            return Ok(());
-        }
-
-        return Err(Error::Custom(str!("Failed to install `{}`.", package)).into());
-    }
-
-    Err(Error::Custom(str!("Unsupported package manager.")).into())
-}
-
-#[cfg(target_os = "linux")]
 async fn perform_unmount(target: &str) -> Result<String> {
-    let dev = find(target).await?;
+    let dev = utils::find_disk(target).await?;
 
-    if is_system_device(&dev) {
+    if utils::is_system_disk(&dev) {
         return Err(Error::Custom(format!(
             "Access denied: `{target}` contains current OS system partitions."
         ))
@@ -530,9 +414,9 @@ async fn perform_unmount(target: &str) -> Result<String> {
     };
 
     let output = Command::new("sudo")
-        .args(["umount", dev_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(["-n", "umount", dev_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output()
         .await?;
 
@@ -550,9 +434,9 @@ async fn perform_unmount(target: &str) -> Result<String> {
 
     if mountpoint.starts_with("/run/media/") && Path::new(&mountpoint).exists() {
         let _ = Command::new("sudo")
-            .args(["rmdir", &mountpoint])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .args(["-n", "rmdir", &mountpoint])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .status()
             .await;
     }
@@ -564,9 +448,9 @@ async fn perform_unmount(target: &str) -> Result<String> {
 
 #[cfg(target_os = "linux")]
 async fn perform_repair(target: &str) -> Result<String> {
-    let dev = find(target).await?;
+    let dev = utils::find_disk(target).await?;
 
-    if is_system_device(&dev) {
+    if utils::is_system_disk(&dev) {
         return Err(Error::Custom(format!(
             "Access denied: Cannot run repair on system device `{target}`."
         ))
@@ -620,21 +504,22 @@ async fn perform_repair(target: &str) -> Result<String> {
     ensure_tool(&repair).await?;
 
     let mut cmd = Command::new("sudo");
+    cmd.args(["-n", repair.tool]);
     match repair.tool {
         "ntfsfix" => {
-            cmd.args(["ntfsfix", "-b", "-d", &dev_path]);
+            cmd.args(["-b", "-d", &dev_path]);
         }
         "e2fsck" => {
-            cmd.args(["e2fsck", "-p", &dev_path]);
+            cmd.args(["-p", &dev_path]);
         }
         "fsck.exfat" => {
-            cmd.args(["fsck.exfat", &dev_path]);
+            cmd.args([&dev_path]);
         }
         "btrfs" => {
-            cmd.args(["btrfs", "check", "--repair", &dev_path]);
+            cmd.args(["check", "--repair", &dev_path]);
         }
         "fsck.f2fs" => {
-            cmd.args(["fsck.f2fs", "-a", &dev_path]);
+            cmd.args(["-a", &dev_path]);
         }
         _ => {
             return Err(
@@ -644,8 +529,8 @@ async fn perform_repair(target: &str) -> Result<String> {
     }
 
     let status = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .status()
         .await?;
     let mut code = status.code().unwrap_or(1);
@@ -684,7 +569,7 @@ async fn perform_repair(target: &str) -> Result<String> {
 
 #[log()]
 pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
-    match list().await {
+    match utils::list_disks().await {
         Ok(devices) => {
             let msg = format_disk_tree(&devices);
             info!("Disk list fetched successfully");
@@ -699,7 +584,7 @@ pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
 pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let dev = find(&action.target).await?;
+        let dev = utils::find_disk(&action.target).await?;
         let msg = format_device_info(&dev);
         info!("Disk info fetched for target {}", action.target);
         tx.send(Event::Answer(msg))?;
@@ -716,13 +601,11 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
 pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!();
+        let dev = utils::find_disk(&action.target).await?;
 
-        let dev = find(&action.target).await?;
-
-        if is_system_device(&dev) {
+        if utils::is_system_disk(&dev) {
             return Err(Error::Custom(format!(
-                "Access denied: '{target}' is part of the system drive.",
+                "Access denied: `{target}` is part of the system drive.",
                 target = action.target
             ))
             .into());
@@ -737,6 +620,7 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
             let msg = format!("Device `{dev_path}` is already mounted at `{mount}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
+            return Ok(());
         }
 
         let mount_path = build_mount_path(&dev, action.point.as_deref());
@@ -746,6 +630,7 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
             let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
+            return Ok(());
         }
 
         // 2. Automatic repair
@@ -756,6 +641,7 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
             let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
+            return Ok(());
         }
 
         // 4. Fallback RO
@@ -763,6 +649,7 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
             let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
+            return Ok(());
         }
 
         Err(Error::Custom(str!("Failed to mount device after repair attempts.")).into())
@@ -778,8 +665,6 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
 pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!();
-
         let msg = perform_unmount(&action.target).await?;
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
@@ -796,8 +681,6 @@ pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<
 pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!();
-
         let msg = perform_repair(&action.target).await?;
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
@@ -814,12 +697,10 @@ pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()
 pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        osy_share::ensure_sudo_priv!();
-
         // check device before requesting confirmation
-        let dev = find(&action.target).await?;
+        let dev = utils::find_disk(&action.target).await?;
 
-        if is_system_device(&dev) {
+        if utils::is_system_disk(&dev) {
             return Err(Error::Custom(format!(
                 "Cannot format system drive '{target}'!",
                 target = action.target
@@ -877,7 +758,7 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
 
         ensure_tool(&ToolPkg { tool, package: pkg }).await?;
 
-        let mut args = vec![tool];
+        let mut args = vec!["-n", tool];
         if let Some(ref label) = action.label {
             match action.fs.as_str() {
                 "ext4" | "btrfs" | "ntfs" | "vfat" | "exfat" => {
@@ -890,11 +771,12 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
         args.push(dev_path);
 
         let status = Command::new("sudo")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .status()
             .await?;
+
         if !status.success() {
             return Err(
                 Error::Custom(format!("Failed to format `{dev_path}` as {}", action.fs)).into(),
