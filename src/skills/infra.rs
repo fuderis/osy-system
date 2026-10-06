@@ -6,14 +6,22 @@ use crate::{
 use anylm::{Schema, api::Tool};
 use atoman::{
     Command, fs,
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use russh_keys::ssh_key::rand_core::OsRng;
 use std::process::Stdio;
 
+// Registry to keep track of active tunnel cancellation channels by local port
+static ACTIVE_TUNNELS: SharedMap<u16, Sender<()>> = SharedMap::new();
+
 pub fn tools_list() -> Vec<Tool> {
     vec![
+        Tool::typed::<ConnectAction>(
+            "connect",
+            "Opens an interactive SSH session to a remote VPS in a new terminal window.",
+        ),
         Tool::typed::<InfoAction>(
             "info",
             "Fetches diagnostics, CPU/RAM usage, active services, and OS stats from a remote VPS.",
@@ -42,6 +50,10 @@ pub fn tools_list() -> Vec<Tool> {
             "route",
             "Performs continuous network route quality analysis using MTR.",
         ),
+        Tool::typed::<TunnelAction>(
+            "tunnel",
+            "Manages persistent SOCKS5 SSH proxy tunnel using pure Rust async runtime.",
+        ),
     ]
 }
 
@@ -50,11 +62,19 @@ pub fn tools_list() -> Vec<Tool> {
 // ============================================================================
 
 #[derive(Debug, Deserialize, Schema)]
-pub struct InfoAction {
-    /// Target VPS IP/Host (e.g. '192.168.1.1' or 'user@192.168.1.1'). Omit for DEFAULT_VPS_HOST.
+pub struct ConnectAction {
+    /// Target VPS host (e.g. 'user@192.168.1.1'). Omit for default host.
     pub host: Option<String>,
     /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
-    pub identity_file: Option<String>,
+    pub ssh_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Schema)]
+pub struct InfoAction {
+    /// Target VPS IP/Host (e.g. 'user@192.168.1.1'). Omit for DEFAULT_VPS_HOST.
+    pub host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
+    pub ssh_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Schema)]
@@ -73,7 +93,7 @@ pub struct UserAction {
     /// Target VPS host. Omit for default.
     pub host: Option<String>,
     /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
-    pub identity_file: Option<String>,
+    pub ssh_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Schema)]
@@ -88,7 +108,7 @@ pub struct TransferAction {
     /// Target VPS host. Omit for default.
     pub host: Option<String>,
     /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
-    pub identity_file: Option<String>,
+    pub ssh_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Schema)]
@@ -102,7 +122,7 @@ pub struct SyncConfigAction {
     /// Target VPS host. Omit for default.
     pub host: Option<String>,
     /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
-    pub identity_file: Option<String>,
+    pub ssh_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Schema)]
@@ -133,9 +153,117 @@ pub struct RouteAction {
     pub count: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, Schema)]
+pub struct TunnelAction {
+    /// Tunnel lifecycle action.
+    #[schema(variants = ["start", "stop", "status", "restart"])]
+    action: String,
+    /// Local port to bind (default: 1080).
+    port: Option<u16>,
+    /// Target VPS SSH host. Omit for default.
+    host: Option<String>,
+    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
+    ssh_file: Option<String>,
+}
+
 // ============================================================================
 // HANDLERS
 // ============================================================================
+
+#[log()]
+pub async fn handle_connect(tx: Sender<Bytes>, action: ConnectAction) -> Result<()> {
+    let host = utils::resolve_host(action.host.as_deref())?;
+
+    tx.send(Event::Thinking(format!(
+        "Opening SSH session to `{host}` in a new terminal window..."
+    )))?;
+
+    let mut ssh_args = vec![host.clone()];
+    if let Some(ref identity) = action.ssh_file {
+        let path = utils::expand_home(identity);
+        ssh_args.push("-i".to_string());
+        ssh_args.push(path.to_string_lossy().to_string());
+    }
+
+    let ssh_cmd = format!("ssh {}", ssh_args.join(" "));
+    let bash_cmd = format!("{ssh_cmd}; exec bash");
+
+    #[allow(unused)]
+    let mut child_res = Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "No suitable terminal emulator found",
+    ));
+
+    #[cfg(target_os = "macos")]
+    {
+        child_res = Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"Terminal\" to do script \"{ssh_cmd}\""
+            ))
+            .spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        child_res = Command::new("kgx")
+            .args(["-e", "bash", "-c", &bash_cmd])
+            .spawn();
+
+        if child_res.is_err() {
+            child_res = Command::new("xdg-terminal-exec")
+                .args(["bash", "-c", &bash_cmd])
+                .spawn();
+        }
+
+        if child_res.is_err() {
+            if let Ok(term) = std::env::var("TERMINAL") {
+                child_res = Command::new(&term)
+                    .args(["-e", "bash", "-c", &bash_cmd])
+                    .spawn();
+            }
+        }
+
+        if child_res.is_err() {
+            let terms: &[(&str, Vec<&str>)] = &[
+                ("x-terminal-emulator", vec!["-e", &ssh_cmd]),
+                ("ptyxis", vec!["--", "bash", "-c", &bash_cmd]),
+                ("gnome-terminal", vec!["--", "bash", "-c", &bash_cmd]),
+                ("konsole", vec!["-e", "bash", "-c", &bash_cmd]),
+                ("xfce4-terminal", vec!["-e", &ssh_cmd]),
+                ("alacritty", vec!["-e", "bash", "-c", &bash_cmd]),
+                ("kitty", vec!["bash", "-c", &bash_cmd]),
+                ("xterm", vec!["-e", &ssh_cmd]),
+            ];
+
+            for (binary, args) in terms {
+                let res = Command::new(binary).args(args).spawn();
+                if res.is_ok() {
+                    child_res = res;
+                    break;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        child_res = Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", &ssh_cmd])
+            .spawn();
+    }
+
+    match child_res {
+        Ok(_) => {
+            tx.send(Event::Answer(format!(
+                "Opened new window with SSH connection to `{host}`."
+            )))?;
+            info!("Spawned new terminal SSH session for host '{host}'.");
+            Ok(())
+        }
+        Err(e) => Err(Error::Custom(format!("Failed to launch new terminal process: {e}")).into()),
+    }
+}
 
 #[log()]
 pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
@@ -144,7 +272,7 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
 
     tx.send(Event::Thinking(
         "Fetching OS info, uptime, and load average...".into(),
@@ -225,7 +353,7 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
 #[log()]
 pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
     let host = utils::resolve_host(action.host.as_deref())?;
-    let identity = action.identity_file.as_deref();
+    let identity = action.ssh_file.as_deref();
 
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for user management..."
@@ -457,7 +585,7 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Resul
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for file transfer..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
 
     let local_path = utils::expand_home(&action.local_path);
     let remote_path = action.remote_path.as_str();
@@ -536,7 +664,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for config sync..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.identity_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
 
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -850,5 +978,168 @@ pub async fn handle_route(tx: Sender<Bytes>, action: RouteAction) -> Result<()> 
     }
 
     info!("Executed MTR route analysis to '{target}'.");
+    Ok(())
+}
+
+#[log()]
+pub async fn handle_tunnel(tx: Sender<Bytes>, action: TunnelAction) -> Result<()> {
+    let port = action.port.unwrap_or(1080);
+    let vps = utils::resolve_host(action.host.as_deref())?;
+
+    match action.action.as_str() {
+        "start" => {
+            let addr = format!("127.0.0.1:{port}");
+            let listener = TcpListener::bind(&addr).await.map_err(|e| {
+                Error::Custom(format!("Port {port} is already in use or bind failed: {e}"))
+            })?;
+
+            let conn = utils::SshConnection::connect(&vps, action.ssh_file.as_deref()).await?;
+            let session = Arc::new(conn.session);
+
+            let (stop_tx, mut stop_rx) = atoman::oneshot_channel::<()>();
+            {
+                if let Some(old_stop_tx) = ACTIVE_TUNNELS.insert(port, stop_tx).await {
+                    old_stop_tx.write().await.send(()).ok();
+                }
+            }
+
+            // spawn async SOCKS5 proxy server task with graceful cancellation support
+            atoman::spawn(async move {
+                loop {
+                    atoman::select! {
+                        _ = &mut stop_rx => {
+                            info!("Shutdown signal received. Stopping SOCKS5 proxy on port `{port}`...");
+                            break;
+                        }
+                        accept_res = listener.accept() => {
+                            let (mut socket, _) = match accept_res {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    error!("Failed to accept TCP connection on port `{port}`: {e}");
+                                    break;
+                                }
+                            };
+
+                            let session_clone = Arc::clone(&session);
+                            atoman::spawn(async move {
+                                // SOCKS5 proxy handshaking
+                                let mut buf = [0u8; 256];
+                                if socket.read_exact(&mut buf[..2]).await.is_err() {
+                                    return;
+                                }
+                                let nmethods = buf[1] as usize;
+                                if socket.read_exact(&mut buf[..nmethods]).await.is_err() {
+                                    return;
+                                }
+                                // NO AUTH response
+                                if socket.write_all(&[0x05, 0x00]).await.is_err() {
+                                    return;
+                                }
+
+                                // SOCKS Request
+                                if socket.read_exact(&mut buf[..4]).await.is_err() {
+                                    return;
+                                }
+                                if buf[1] != 0x01 {
+                                    return; // support only CONNECT
+                                }
+
+                                let target_host = match buf[3] {
+                                    0x01 => {
+                                        // IPv4
+                                        let mut ip = [0u8; 4];
+                                        if socket.read_exact(&mut ip).await.is_err() {
+                                            return;
+                                        }
+                                        std::net::Ipv4Addr::from(ip).to_string()
+                                    }
+                                    0x03 => {
+                                        // Domain
+                                        let mut len = [0u8; 1];
+                                        if socket.read_exact(&mut len).await.is_err() {
+                                            return;
+                                        }
+                                        let mut domain = vec![0u8; len[0] as usize];
+                                        if socket.read_exact(&mut domain).await.is_err() {
+                                            return;
+                                        }
+                                        String::from_utf8_lossy(&domain).to_string()
+                                    }
+                                    _ => return,
+                                };
+
+                                let mut port_buf = [0u8; 2];
+                                if socket.read_exact(&mut port_buf).await.is_err() {
+                                    return;
+                                }
+                                let target_port = u16::from_be_bytes(port_buf);
+
+                                // open SSH Direct TCP/IP channel to target host
+                                if let Ok(channel) = session_clone
+                                    .channel_open_direct_tcpip(
+                                        &target_host,
+                                        target_port as u32,
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    // send success response for SOCKS5
+                                    let _ = socket
+                                        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                                        .await;
+
+                                    let (mut reader, mut writer) = socket.split();
+                                    let mut channel_stream = channel.into_stream();
+
+                                    let _ = atoman::io::copy_bidirectional(
+                                        &mut channel_stream,
+                                        &mut atoman::io::join(&mut reader, &mut writer),
+                                    )
+                                    .await;
+                                }
+                            });
+                        }
+                    }
+                }
+                info!("SOCKS5 Proxy loop exited for port `{port}`.");
+            });
+
+            tx.send(Event::Answer(format!(
+                "SOCKS5 Proxy listening locally on `127.0.0.1:{port}` via `{vps}`."
+            )))?;
+        }
+        "stop" => {
+            let msg = if let Some(stop_tx) = ACTIVE_TUNNELS.remove(&port).await {
+                let _ = stop_tx.write().await.send(());
+                info!("Signal sent to stop proxy listener on port `{port}`.");
+                format!("Successfully stopped SOCKS5 proxy tunnel on port `{port}`.")
+            } else {
+                warn!("Stop requested, but no active tunnel found registered on port `{port}`");
+                format!("No active proxy tunnel found running on port `{port}`.")
+            };
+
+            info!("{msg}");
+            tx.send(Event::Answer(msg))?;
+        }
+        "status" => {
+            let is_registered = ACTIVE_TUNNELS.get(&port).await.is_some();
+            let addr = format!("127.0.0.1:{port}");
+            let is_port_bound = TcpListener::bind(&addr).await.is_err();
+
+            let msg = if is_registered || is_port_bound {
+                format!(
+                    "Tunnel status for port `{port}`: **ACTIVE** (Port occupied by active SOCKS5 worker)"
+                )
+            } else {
+                format!("No active proxy tunnel found listening on port `{port}`.")
+            };
+
+            info!("{msg}");
+            tx.send(Event::Answer(msg))?;
+        }
+        _ => return Err(Error::Custom("Invalid tunnel action".into()).into()),
+    }
+
     Ok(())
 }

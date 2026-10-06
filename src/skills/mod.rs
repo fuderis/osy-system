@@ -76,6 +76,8 @@ pub enum SkillKind {
         description = "Remote VPS infrastructure management (diagnostics, users, rsync file transfer, config sync).",
         prompt = "You can safely run the necessary commands - the user will still receive a prompt for confirmation."
     )]
-    #[tools("info", "user", "transfer", "sync", "ping", "trace", "route")]
+    #[tools(
+        "connect", "info", "user", "transfer", "sync", "ping", "trace", "route", "tunnel"
+    )]
     Infra,
 }

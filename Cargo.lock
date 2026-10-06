@@ -151,12 +151,12 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "anylm"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fed6e86be51d70717156ec5725376b35d1f2dd330f4e3ea0c5dfd0be0d4e9a8d"
+checksum = "5d4929ea9d85cf6795c1878e38c2c0a669d2e99831ffe05f247b99da1025904a"
 dependencies = [
  "anylm-schema",
- "atoman",
+ "atoman 0.12.1",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -243,6 +243,20 @@ name = "atoman"
 version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e93c3dbd203d23c34c3ed4a205f7c8b0e17ecdaa9303083f1cb01d91e6bfc9f"
+dependencies = [
+ "ahash",
+ "arc-swap",
+ "atoman-macros",
+ "macron 0.5.2",
+ "once_cell",
+ "tokio",
+]
+
+[[package]]
+name = "atoman"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "233e63e5f936426fa9d79ecce234cbf2dcf1ae9f13fec4f25b4961ce40ffc69a"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -3544,7 +3558,7 @@ name = "osy-share"
 version = "0.0.0"
 dependencies = [
  "anylm",
- "atoman",
+ "atoman 0.12.1",
  "chrono",
  "macron 0.5.2",
  "pearce",
@@ -3567,10 +3581,10 @@ dependencies = [
 
 [[package]]
 name = "osy-system"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anylm",
- "atoman",
+ "atoman 0.12.1",
  "base64 0.23.1",
  "chrono",
  "macron 0.5.2",
@@ -3762,11 +3776,11 @@ dependencies = [
 
 [[package]]
 name = "pearce"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e58b2485c3a068b860971cfa65af4a5fc122987fde35950dee7c166c9445dc2"
+checksum = "615f778674dc0ed3d5ed4128cdb60c3f89b45c47142672ce79346bede772bdf6"
 dependencies = [
- "atoman",
+ "atoman 0.12.1",
  "axum",
  "bytes",
  "futures",
@@ -4376,7 +4390,7 @@ checksum = "e202d3f1a869bc32f1fe77295ac0686944f628231c9d2e55d52045c3c447a267"
 dependencies = [
  "adot-tree-sitter-toml",
  "async-trait",
- "atoman",
+ "atoman 0.11.8",
  "crossterm",
  "heck 0.5.0",
  "macron 0.5.2",
@@ -5450,7 +5464,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd2a1eccbb3cc1fa89eabd318b5c847b79b65191d697385468af573d6427ef1d"
 dependencies = [
- "atoman",
+ "atoman 0.11.8",
  "battery",
  "chrono",
  "cpal",

@@ -9,7 +9,7 @@ pub use atoman::{
     DynError, Result, StdResult,
     file::{Dir, File},
     logger::{LogExt, Logger, Span, error, info, log, warn},
-    map::{SharedGuard, SharedGuardMut, SharedItem, SharedMap},
+    shared::{SharedGuard, SharedGuardMut, SharedItem, SharedMap},
     state::{State, StateGuard},
     sync::{Mutex, RwLock},
     time::Instant,

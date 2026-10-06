@@ -5,7 +5,7 @@ use russh::{
     keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
 
-struct SshClientHandler;
+pub struct SshClientHandler;
 
 impl Handler for SshClientHandler {
     type Error = russh::Error;
@@ -19,7 +19,7 @@ impl Handler for SshClientHandler {
 }
 
 pub struct SshConnection {
-    session: client::Handle<SshClientHandler>,
+    pub session: client::Handle<SshClientHandler>,
 }
 
 impl SshConnection {
