@@ -7,9 +7,8 @@ pub mod theme;
 
 use crate::prelude::*;
 
-use anylm::api::Tool;
+use anylm::Tool;
 use osy_skill::AgentSkill;
-use pearce::{Bytes, Sender};
 
 /// System agent skills.
 #[derive(AgentSkill, Clone, Copy, Debug, Display, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -65,10 +64,10 @@ pub enum SkillKind {
 
     #[skill(
         module = "disk",
-        description = "Disk management (list, mount, unmount, format).",
+        description = "Disk management (list, mount, unmount, format, backup).",
         prompt = "You can safely run the necessary commands - the user will still receive a prompt for confirmation."
     )]
-    #[tools("list", "info", "mount", "unmount", "repair", "format")]
+    #[tools("list", "info", "mount", "unmount", "repair", "format", "backup")]
     Disk,
 
     #[skill(

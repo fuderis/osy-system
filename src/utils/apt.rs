@@ -3,6 +3,40 @@ use crate::prelude::*;
 use atoman::process::Command;
 use std::process::Stdio;
 
+pub struct ToolPkg {
+    pub tool: &'static str,
+    pub package: &'static str,
+}
+
+#[cfg(target_os = "linux")]
+pub async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
+    let status = Command::new("sh")
+        .args(["-c", &format!("command -v {}", repair.tool)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .status()
+        .await?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    install_package(repair.package).await?;
+
+    let status = Command::new("sh")
+        .args(["-c", &format!("command -v {}", repair.tool)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .status()
+        .await?;
+
+    if !status.success() {
+        return Err(Error::Custom(str!("Failed to install `{}`.", repair.tool)).into());
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 pub async fn install_package(package: &str) -> Result<()> {
     let managers = [

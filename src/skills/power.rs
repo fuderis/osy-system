@@ -37,9 +37,11 @@ pub struct PowerAction {
     timestamp: Option<DateTime<Utc>>,
 }
 
-#[log(mode = %action.mode)]
-pub async fn handle_schedule(tx: Sender<Bytes>, action: PowerAction) -> Result<()> {
-    let local = action
+#[log(mode = %query.payload.mode)]
+pub async fn handle_schedule(tx: Sender<Bytes>, query: ToolQuery<PowerAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let local = payload
         .timestamp
         .map(|utc| {
             utc.with_timezone(&Local)
@@ -48,11 +50,11 @@ pub async fn handle_schedule(tx: Sender<Bytes>, action: PowerAction) -> Result<(
         })
         .unwrap_or("now".into());
 
-    match PowerManager::schedule(action.mode, action.timestamp).await {
+    match PowerManager::schedule(payload.mode, payload.timestamp).await {
         Ok(_) => {
             let msg = format!(
                 "Scheduled power action: {mode}. Execution time: {local}.",
-                mode = action.mode
+                mode = payload.mode
             );
 
             info!("{msg}");
@@ -65,10 +67,10 @@ pub async fn handle_schedule(tx: Sender<Bytes>, action: PowerAction) -> Result<(
 }
 
 #[log()]
-pub async fn handle_cancel(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_cancel(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     let msg = match PowerManager::cancel().await {
         Some(mode) => format!("Scheduled power action canceled. Canceled action: {mode}."),
-        None => "There is no scheduled power action.".into(),
+        None => "There is no scheduled power payload.".into(),
     };
 
     info!("{msg}");
@@ -77,7 +79,7 @@ pub async fn handle_cancel(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()>
 }
 
 #[log()]
-pub async fn handle_status(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_status(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     let msg = match PowerManager::status().await {
         Some(task) => {
             format!(

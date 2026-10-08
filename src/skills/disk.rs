@@ -1,11 +1,10 @@
 use crate::{
     prelude::*,
-    utils::{self, Device},
+    utils::{self, ToolPkg},
 };
 
 use anylm::{Schema, api::Tool};
 use atoman::process::Command;
-use pearce::stream::futures::FutureExt;
 use std::process::Stdio;
 
 pub fn tools_list() -> Vec<Tool> {
@@ -30,6 +29,10 @@ pub fn tools_list() -> Vec<Tool> {
         Tool::typed::<FormatAction>(
             "format",
             "Formats a disk partition or drive with the specified file system. WARNING: Deletes all data on target.",
+        ),
+        Tool::typed::<BackupAction>(
+            "backup",
+            "Backs up the current working directory or a specified file/directory to a target storage device, excluding build artifacts (e.g. target, node_modules).",
         ),
     ]
 }
@@ -75,492 +78,12 @@ pub struct FormatAction {
     pub label: Option<String>,
 }
 
-// ============================================================================
-// DISPLAY STRUCTURES & HELPERS
-// ============================================================================
-
-struct DisplayDevice<'a> {
-    name: &'a str,
-    label: Option<&'a str>,
-    fstype: Option<&'a str>,
-    size: Option<&'a str>,
-    used: Option<String>,
-    free: Option<String>,
-    mount: Option<&'a str>,
-    children: &'a [Device],
-}
-
-struct ToolPkg {
-    tool: &'static str,
-    package: &'static str,
-}
-
-fn display_device(dev: &Device) -> DisplayDevice<'_> {
-    fn map_fstype(fstype: Option<&str>) -> Option<&str> {
-        match fstype {
-            Some("crypto_LUKS") => Some("luks"),
-            other => other,
-        }
-    }
-
-    if dev.fstype.as_deref() == Some("crypto_LUKS") && dev.children.len() == 1 {
-        let child = &dev.children[0];
-
-        return DisplayDevice {
-            name: &dev.name,
-            label: child.label.as_deref(),
-            fstype: map_fstype(child.fstype.as_deref()),
-            size: child.size.as_deref(),
-            used: used(child),
-            free: free(child),
-            mount: child.mountpoint.as_deref(),
-            children: &[],
-        };
-    }
-
-    DisplayDevice {
-        name: &dev.name,
-        label: dev.label.as_deref(),
-        fstype: map_fstype(dev.fstype.as_deref()),
-        size: dev.size.as_deref(),
-        used: used(dev),
-        free: free(dev),
-        mount: dev.mountpoint.as_deref(),
-        children: &dev.children,
-    }
-}
-
-fn used(dev: &Device) -> Option<String> {
-    match (&dev.fsused, &dev.fsuse_percent) {
-        (Some(used), Some(percent)) => Some(format!("{used} ({percent})")),
-        (Some(used), None) => Some(used.clone()),
-        _ => None,
-    }
-}
-
-fn free(dev: &Device) -> Option<String> {
-    match (&dev.fsavail, &dev.fsuse_percent) {
-        (Some(free), Some(percent)) => {
-            let p = percent.trim_end_matches('%');
-
-            if let Ok(v) = p.parse::<u8>() {
-                Some(format!("{free} ({}%)", 100 - v))
-            } else {
-                Some(free.clone())
-            }
-        }
-        (Some(free), None) => Some(free.clone()),
-        _ => None,
-    }
-}
-
-fn format_disk_tree(devices: &[Device]) -> String {
-    let mut out = String::new();
-    out.push_str("| Name | Label | FS | Size | Used | Free | Mount Point |\n");
-    out.push_str("|---|---|---|---|---|---|---|\n");
-
-    let len = devices.len();
-    for (i, dev) in devices.iter().enumerate() {
-        let is_last = i + 1 == len;
-        append_device_rows(&mut out, dev, 0, is_last, "");
-    }
-
-    out
-}
-
-fn append_device_rows(out: &mut String, dev: &Device, depth: usize, is_last: bool, prefix: &str) {
-    let d = display_device(dev);
-
-    let branch = if depth > 0 {
-        if is_last { "└ " } else { "├ " }
-    } else {
-        ""
-    };
-
-    let name_field = format!("{}{}{}", prefix, branch, d.name);
-    let is_parent = depth == 0;
-
-    out.push_str(&format!(
-        "| {} | {} | {} | {} | {} | {} | {} |\n",
-        if is_parent {
-            format!("**`{name_field}`**")
-        } else {
-            name_field
-        },
-        if !is_parent {
-            d.label.unwrap_or("—")
-        } else {
-            ""
-        },
-        if !is_parent {
-            d.fstype.map(|s| format!("`{s}`")).unwrap_or("—".into())
-        } else {
-            "".into()
-        },
-        if !is_parent {
-            d.size.unwrap_or("—")
-        } else {
-            ""
-        },
-        if !is_parent {
-            d.used.as_deref().unwrap_or("—")
-        } else {
-            ""
-        },
-        if !is_parent {
-            d.free.as_deref().unwrap_or("—")
-        } else {
-            ""
-        },
-        if !is_parent {
-            d.mount.map(|s| format!("`{s}`")).unwrap_or("—".into())
-        } else {
-            "".into()
-        },
-    ));
-
-    let next_prefix = if depth > 0 {
-        if is_last {
-            format!("{}    ", prefix)
-        } else {
-            format!("{}│   ", prefix)
-        }
-    } else {
-        "".to_string()
-    };
-
-    let children = d.children;
-    let children_len = children.len();
-    for (i, child) in children.iter().enumerate() {
-        let child_is_last = i + 1 == children_len;
-        append_device_rows(out, child, depth + 1, child_is_last, &next_prefix);
-    }
-}
-
-fn format_device_info(dev: &Device) -> String {
-    let mut out = String::new();
-
-    let name = &dev.name;
-    let path = dev.path.as_deref().unwrap_or("—");
-    let label = dev.label.as_deref().unwrap_or("—");
-    let uuid = dev.uuid.as_deref().unwrap_or("—");
-    let fstype = dev.fstype.as_deref().unwrap_or("—");
-    let size = dev.size.as_deref().unwrap_or("—");
-    let mountpoint = dev.mountpoint.as_deref().unwrap_or("—");
-    let is_sys = if utils::is_system_disk(dev) {
-        "**Yes** (Protected)"
-    } else {
-        "No"
-    };
-
-    let used_val = dev.fsused.as_deref().unwrap_or("—");
-    let usage_pct = dev.fsuse_percent.as_deref().unwrap_or("");
-    let used_str = if usage_pct.is_empty() {
-        used_val.to_string()
-    } else {
-        format!("{used_val} ({usage_pct})")
-    };
-    let avail_str = dev.fsavail.as_deref().unwrap_or("—");
-
-    out.push_str("| Property | Value |\n");
-    out.push_str("|---|---|\n");
-    out.push_str(&format!("| **Device Name** | `{name}` |\n"));
-    out.push_str(&format!("| **Device Path** | `{path}` |\n"));
-    out.push_str(&format!("| **Label** | **{label}** |\n"));
-    out.push_str(&format!("| **UUID** | `{uuid}` |\n"));
-    out.push_str(&format!("| **Filesystem** | `{fstype}` |\n"));
-    out.push_str(&format!("| **Total Size** | {size} |\n"));
-    out.push_str(&format!("| **Used Space** | {used_str} |\n"));
-    out.push_str(&format!("| **Available Space** | {avail_str} |\n"));
-    out.push_str(&format!("| **Mount Point** | `{mountpoint}` |\n"));
-    out.push_str(&format!("| **System Partition** | {is_sys} |\n"));
-
-    if !dev.children.is_empty() {
-        out.push_str("\n#### Partitions / Sub-devices\n\n");
-        out.push_str("| Name | Label | FS | Size | Mount Point |\n");
-        out.push_str("|---|---|---|---|---|\n");
-        for child in &dev.children {
-            out.push_str(&format!(
-                "| `{}` | {} | `{}` | {} | `{}` |\n",
-                child.name,
-                child.label.as_deref().unwrap_or("—"),
-                child.fstype.as_deref().unwrap_or("—"),
-                child.size.as_deref().unwrap_or("—"),
-                child.mountpoint.as_deref().unwrap_or("—")
-            ));
-        }
-    }
-
-    out
-}
-
-fn build_mount_path(dev: &Device, custom_point: Option<&str>) -> String {
-    if let Some(path) = custom_point {
-        return path.to_string();
-    }
-
-    let mount_name = dev
-        .label
-        .as_deref()
-        .filter(|s: &&str| !s.is_empty())
-        .unwrap_or(&dev.name);
-
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-    format!("/run/media/{user}/{mount_name}")
-}
-
-#[cfg(target_os = "linux")]
-async fn ensure_mount_dir(mount_path: &str) -> Result<()> {
-    let status = Command::new("sudo")
-        .args(["-n", "mkdir", "-p", mount_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(Error::Custom(str!("Failed to create mount directory.")).into());
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn try_mount_rw(dev_path: &str, mount_path: &str) -> Result<()> {
-    ensure_mount_dir(mount_path).await?;
-
-    let status = Command::new("sudo")
-        .args(["-n", "mount", dev_path, mount_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    Err(Error::Custom(str!("Read-write mount failed.")).into())
-}
-
-#[cfg(target_os = "linux")]
-async fn try_mount_ro(dev_path: &str, mount_path: &str) -> Result<()> {
-    ensure_mount_dir(mount_path).await?;
-
-    let status = Command::new("sudo")
-        .args(["-n", "mount", "-o", "ro", dev_path, mount_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    Err(Error::Custom(str!("Read-only mount failed.")).into())
-}
-
-#[cfg(target_os = "linux")]
-async fn ensure_tool(repair: &ToolPkg) -> Result<()> {
-    let status = Command::new("sh")
-        .args(["-c", &format!("command -v {}", repair.tool)])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    utils::install_package(repair.package).await?;
-
-    let status = Command::new("sh")
-        .args(["-c", &format!("command -v {}", repair.tool)])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(Error::Custom(str!("Failed to install `{}`.", repair.tool)).into());
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn perform_unmount(target: &str) -> Result<String> {
-    let dev = utils::find_disk(target).await?;
-
-    if utils::is_system_disk(&dev) {
-        return Err(Error::Custom(format!(
-            "Access denied: `{target}` contains current OS system partitions."
-        ))
-        .into());
-    }
-
-    let mountpoint = match dev.mountpoint.clone() {
-        Some(mp) => mp,
-        None => {
-            return Err(Error::Custom(format!("Device `{}` is not mounted.", target)).into());
-        }
-    };
-
-    let dev_path = match dev.path.as_deref() {
-        Some(path) => path,
-        None => return Err(Error::Custom(str!("Device path is missing.")).into()),
-    };
-
-    let output = Command::new("sudo")
-        .args(["-n", "umount", dev_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if stderr.contains("not mounted") {
-            return Err(Error::Custom(format!("Device `{}` is not mounted.", target)).into());
-        }
-
-        return Err(
-            Error::Custom(format!("Failed to unmount `{}`: {}", target, stderr.trim())).into(),
-        );
-    }
-
-    if mountpoint.starts_with("/run/media/") && Path::new(&mountpoint).exists() {
-        let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &mountpoint])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .status()
-            .await;
-    }
-
-    Ok(format!(
-        "Successfully unmounted `{dev_path}` from `{mountpoint}`."
-    ))
-}
-
-#[cfg(target_os = "linux")]
-async fn perform_repair(target: &str) -> Result<String> {
-    let dev = utils::find_disk(target).await?;
-
-    if utils::is_system_disk(&dev) {
-        return Err(Error::Custom(format!(
-            "Access denied: Cannot run repair on system device `{target}`."
-        ))
-        .into());
-    }
-
-    let dev_path = match dev.path.as_deref() {
-        Some(path) => path.to_string(),
-        None => return Err(Error::Custom(str!("Device path is missing.")).into()),
-    };
-
-    // remember if disk was mounted and where
-    let original_mountpoint = dev.mountpoint.clone();
-
-    // unmount if it was mounted
-    if original_mountpoint.is_some() {
-        perform_unmount(target).await?;
-    }
-
-    let repair = match dev.fstype.as_deref() {
-        Some("ntfs") => ToolPkg {
-            tool: "ntfsfix",
-            package: "ntfsprogs",
-        },
-        Some("ext4") => ToolPkg {
-            tool: "e2fsck",
-            package: "e2fsprogs",
-        },
-        Some("exfat") => ToolPkg {
-            tool: "fsck.exfat",
-            package: "exfatprogs",
-        },
-        Some("btrfs") => ToolPkg {
-            tool: "btrfs",
-            package: "btrfs-progs",
-        },
-        Some("f2fs") => ToolPkg {
-            tool: "fsck.f2fs",
-            package: "f2fs-tools",
-        },
-        Some(fs) => {
-            return Err(
-                Error::Custom(str!("Automatic repair for `{}` is not supported.", fs)).into(),
-            );
-        }
-        None => {
-            return Err(Error::Custom(str!("Could not detect filesystem type.")).into());
-        }
-    };
-
-    ensure_tool(&repair).await?;
-
-    let mut cmd = Command::new("sudo");
-    cmd.args(["-n", repair.tool]);
-    match repair.tool {
-        "ntfsfix" => {
-            cmd.args(["-b", "-d", &dev_path]);
-        }
-        "e2fsck" => {
-            cmd.args(["-p", &dev_path]);
-        }
-        "fsck.exfat" => {
-            cmd.args([&dev_path]);
-        }
-        "btrfs" => {
-            cmd.args(["check", "--repair", &dev_path]);
-        }
-        "fsck.f2fs" => {
-            cmd.args(["-a", &dev_path]);
-        }
-        _ => {
-            return Err(
-                Error::Custom(str!("Unsupported repair utility '{}'.", repair.tool)).into(),
-            );
-        }
-    }
-
-    let status = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await?;
-    let mut code = status.code().unwrap_or(1);
-
-    if repair.tool == "e2fsck" && code == 1 {
-        code = 0;
-    }
-
-    if code != 0 {
-        return Err(Error::Custom(str!("Repair utility exited with code {}.", code)).into());
-    }
-
-    // if disk was mounted before the repair, mount it back.
-    let mut mount_msg = String::new();
-    if let Some(ref target_mount) = original_mountpoint {
-        let remount_result = try_mount_rw(&dev_path, target_mount).await.or_else(|_| {
-            try_mount_ro(&dev_path, target_mount)
-                .now_or_never()
-                .unwrap_or(Err(Error::Custom(str!("Mount failed")).into()))
-        });
-
-        match remount_result {
-            Ok(_) => mount_msg = format!(" and remounted at `{target_mount}`"),
-            Err(_) => mount_msg = format!(", but failed to remount at `{target_mount}`"),
-        }
-    }
-
-    Ok(format!(
-        "Filesystem on `{dev_path}` successfully repaired{mount_msg}."
-    ))
+#[derive(Debug, Deserialize, Schema)]
+pub struct BackupAction {
+    /// Path to file or directory to back up. Defaults to current working directory if omitted.
+    pub source: Option<String>,
+    /// Target block device, partition, label, or mount point. Defaults to DEFAULT_BACKUP_DISK env variable if omitted.
+    pub target: Option<String>,
 }
 
 // ============================================================================
@@ -568,10 +91,10 @@ async fn perform_repair(target: &str) -> Result<String> {
 // ============================================================================
 
 #[log()]
-pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_list(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match utils::list_disks().await {
         Ok(devices) => {
-            let msg = format_disk_tree(&devices);
+            let msg = utils::format_disk_tree(&devices);
             info!("Disk list fetched successfully");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -580,13 +103,15 @@ pub async fn handle_list(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
     }
 }
 
-#[log(target = %action.target)]
-pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
+#[log(target = %query.payload.target)]
+pub async fn handle_info(tx: Sender<Bytes>, query: ToolQuery<InfoAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     #[cfg(target_os = "linux")]
     {
-        let dev = utils::find_disk(&action.target).await?;
-        let msg = format_device_info(&dev);
-        info!("Disk info fetched for target {}", action.target);
+        let dev = utils::find_disk(&payload.target).await?;
+        let msg = utils::format_device_info(&dev);
+        info!("Disk info fetched for target {}", payload.target);
         tx.send(Event::Answer(msg))?;
         Ok(())
     }
@@ -597,16 +122,18 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
     }
 }
 
-#[log(target = %action.target)]
-pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> {
+#[log(target = %query.payload.target)]
+pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     #[cfg(target_os = "linux")]
     {
-        let dev = utils::find_disk(&action.target).await?;
+        let dev = utils::find_disk(&payload.target).await?;
 
         if utils::is_system_disk(&dev) {
             return Err(Error::Custom(format!(
                 "Access denied: `{target}` is part of the system drive.",
-                target = action.target
+                target = payload.target
             ))
             .into());
         }
@@ -623,10 +150,14 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
             return Ok(());
         }
 
-        let mount_path = build_mount_path(&dev, action.point.as_deref());
+        let mount_path = utils::build_mount_path(&dev, payload.point.as_deref());
+        let fstype = dev.fstype.as_deref();
 
         // 1. RW attempt
-        if try_mount_rw(dev_path, &mount_path).await.is_ok() {
+        if utils::try_mount_rw(dev_path, &mount_path, fstype)
+            .await
+            .is_ok()
+        {
             let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -634,10 +165,13 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
         }
 
         // 2. Automatic repair
-        let _ = perform_repair(&action.target).await;
+        let _ = utils::perform_repair(&payload.target).await;
 
         // 3. Retry RW
-        if try_mount_rw(dev_path, &mount_path).await.is_ok() {
+        if utils::try_mount_rw(dev_path, &mount_path, fstype)
+            .await
+            .is_ok()
+        {
             let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -645,7 +179,10 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
         }
 
         // 4. Fallback RO
-        if try_mount_ro(dev_path, &mount_path).await.is_ok() {
+        if utils::try_mount_ro(dev_path, &mount_path, fstype)
+            .await
+            .is_ok()
+        {
             let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -661,11 +198,13 @@ pub async fn handle_mount(tx: Sender<Bytes>, action: MountAction) -> Result<()> 
     }
 }
 
-#[log(target = %action.target)]
-pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<()> {
+#[log(target = %query.payload.target)]
+pub async fn handle_unmount(tx: Sender<Bytes>, query: ToolQuery<UnmountAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     #[cfg(target_os = "linux")]
     {
-        let msg = perform_unmount(&action.target).await?;
+        let msg = utils::perform_unmount(&payload.target).await?;
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())
@@ -677,11 +216,13 @@ pub async fn handle_unmount(tx: Sender<Bytes>, action: UnmountAction) -> Result<
     }
 }
 
-#[log(target = %action.target)]
-pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()> {
+#[log(target = %query.payload.target)]
+pub async fn handle_repair(tx: Sender<Bytes>, query: ToolQuery<RepairAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     #[cfg(target_os = "linux")]
     {
-        let msg = perform_repair(&action.target).await?;
+        let msg = utils::perform_repair(&payload.target).await?;
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())
@@ -693,17 +234,19 @@ pub async fn handle_repair(tx: Sender<Bytes>, action: RepairAction) -> Result<()
     }
 }
 
-#[log(fs = %action.fs)]
-pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()> {
+#[log(fs = %query.payload.fs)]
+pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     #[cfg(target_os = "linux")]
     {
         // check device before requesting confirmation
-        let dev = utils::find_disk(&action.target).await?;
+        let dev = utils::find_disk(&payload.target).await?;
 
         if utils::is_system_disk(&dev) {
             return Err(Error::Custom(format!(
                 "Cannot format system drive '{target}'!",
-                target = action.target
+                target = payload.target
             ))
             .into());
         }
@@ -719,7 +262,7 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
             id: d_event_id.clone(),
             prompt: format!(
                 "Are you sure to format device `{dev_path}` as `{fs}`? **ALL DATA WILL BE LOST!**",
-                fs = action.fs,
+                fs = payload.fs,
             ),
             default: Some(Confirmation::No),
         };
@@ -744,10 +287,10 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
 
         // performing unmounting and formatting
         if dev.mountpoint.is_some() {
-            let _ = perform_unmount(&action.target).await;
+            let _ = utils::perform_unmount(&payload.target).await;
         }
 
-        let (tool, pkg) = match action.fs.as_str() {
+        let (tool, pkg) = match payload.fs.as_str() {
             "ext4" => ("mkfs.ext4", "e2fsprogs"),
             "btrfs" => ("mkfs.btrfs", "btrfs-progs"),
             "ntfs" => ("mkfs.ntfs", "ntfsprogs"),
@@ -756,11 +299,11 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
             fs => return Err(Error::Custom(format!("Unsupported filesystem format: {fs}")).into()),
         };
 
-        ensure_tool(&ToolPkg { tool, package: pkg }).await?;
+        utils::ensure_tool(&ToolPkg { tool, package: pkg }).await?;
 
         let mut args = vec!["-n", tool];
-        if let Some(ref label) = action.label {
-            match action.fs.as_str() {
+        if let Some(ref label) = payload.label {
+            match payload.fs.as_str() {
                 "ext4" | "btrfs" | "ntfs" | "vfat" | "exfat" => {
                     args.push("-L");
                     args.push(label.as_str());
@@ -779,11 +322,144 @@ pub async fn handle_format(tx: Sender<Bytes>, action: FormatAction) -> Result<()
 
         if !status.success() {
             return Err(
-                Error::Custom(format!("Failed to format `{dev_path}` as {}", action.fs)).into(),
+                Error::Custom(format!("Failed to format `{dev_path}` as {}", payload.fs)).into(),
             );
         }
 
-        let msg = format!("Successfully formatted `{dev_path}` as {}.", action.fs);
+        let msg = format!("Successfully formatted `{dev_path}` as {}.", payload.fs);
+        info!("{msg}");
+        tx.send(Event::Answer(msg))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(Error::UnsupportedOS.into())
+    }
+}
+
+#[log(target = %query.payload.target.as_deref().unwrap_or("default"))]
+pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) -> Result<()> {
+    let ToolQuery {
+        current_path,
+        payload,
+    } = query;
+
+    #[cfg(target_os = "linux")]
+    {
+        // resolve disk name / fallback env var
+        let target_disk = payload
+            .target
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("DEFAULT_BACKUP_DISK").ok())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                Error::Custom(str!(
+                    "Target disk not specified and DEFAULT_BACKUP_DISK environment variable is missing."
+                ))
+            })?;
+
+        // locate disk device
+        let dev = utils::find_disk(&target_disk).await?;
+        if utils::is_system_disk(&dev) {
+            return Err(Error::Custom(format!(
+                "Access denied: `{target_disk}` is part of the system drive."
+            ))
+            .into());
+        }
+
+        let dev_path = match dev.path.as_deref() {
+            Some(path) => path,
+            None => return Err(Error::Custom(str!("Device path is missing.")).into()),
+        };
+
+        // ensure disk is mounted for read-write
+        let mount_path_buf = if let Some(ref mp) = dev.mountpoint {
+            PathBuf::from(mp)
+        } else {
+            let mount_str = utils::build_mount_path(&dev, None);
+            utils::try_mount_rw(dev_path, &mount_str, dev.fstype.as_deref()).await?;
+            PathBuf::from(mount_str)
+        };
+
+        // resolve source path (current dir or passed path)
+        let source_str = payload.source.as_deref().filter(|s| !s.trim().is_empty());
+        let src_path = match source_str {
+            Some(p) => PathBuf::from(p),
+            None => current_path.unwrap_or(std::env::current_dir()?),
+        };
+
+        let meta = atoman::fs::metadata(&src_path).await.map_err(|e| {
+            Error::Custom(format!(
+                "Failed to access source path `{}`: {e}",
+                src_path.display()
+            ))
+        })?;
+
+        let stem = src_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "backup".into());
+
+        let ext_suffix = src_path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+
+        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+
+        // parent folder in target disk root
+        let root_folder = mount_path_buf.join(&stem);
+        atoman::fs::create_dir_all(&root_folder).await?;
+
+        let total_files: u64;
+        let dest_display: String;
+
+        if meta.is_dir() {
+            let backup_dir_name = format!("{stem}__{timestamp}");
+            let target_dir = root_folder.join(&backup_dir_name);
+            dest_display = target_dir.display().to_string();
+
+            total_files = utils::copy_directory_with_excludes(&src_path, &target_dir, &tx).await?;
+        } else if meta.is_file() {
+            let backup_file_name = format!("{stem}__{timestamp}{ext_suffix}");
+            let target_file = root_folder.join(&backup_file_name);
+            dest_display = target_file.display().to_string();
+
+            let file_name = src_path
+                .file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default();
+
+            let _ = tx.send(Event::Thinking(format!("Backing up file: {file_name}")));
+            atoman::fs::copy(&src_path, &target_file).await?;
+            total_files = 1;
+        } else {
+            return Err(
+                Error::Custom(str!("Source path is neither a file nor a directory.")).into(),
+            );
+        }
+
+        let (uid, gid) = utils::resolve_target_uid_gid(&mount_path_buf.to_string_lossy());
+
+        let _ = atoman::Command::new("sudo")
+            .args([
+                "-n",
+                "chown",
+                "-R",
+                &format!("{uid}:{gid}"),
+                &root_folder.to_string_lossy(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        let msg = format!(
+            "Successfully backed up {total_files} file(s) from `{}` to `{dest_display}`.",
+            src_path.display()
+        );
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())

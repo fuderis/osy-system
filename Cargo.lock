@@ -3581,12 +3581,13 @@ dependencies = [
 
 [[package]]
 name = "osy-system"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anylm",
  "atoman 0.12.1",
  "base64 0.23.1",
  "chrono",
+ "libc",
  "macron 0.5.2",
  "music-index",
  "osy-share",

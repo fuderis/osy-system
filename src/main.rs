@@ -22,11 +22,12 @@ pub mod utils;
 pub mod handlers;
 pub mod skills;
 
+use prelude::*;
+use skills::SkillKind;
+
 use osy_share::AgentMeta;
 use pearce::Server;
-use prelude::*;
 use rigging::{CommandContext, Commands, pkg_meta};
-use skills::SkillKind;
 
 #[atoman::main]
 async fn main() -> Result<()> {

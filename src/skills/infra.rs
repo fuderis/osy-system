@@ -171,15 +171,17 @@ pub struct TunnelAction {
 // ============================================================================
 
 #[log()]
-pub async fn handle_connect(tx: Sender<Bytes>, action: ConnectAction) -> Result<()> {
-    let host = utils::resolve_host(action.host.as_deref())?;
+pub async fn handle_connect(tx: Sender<Bytes>, query: ToolQuery<ConnectAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let host = utils::resolve_host(payload.host.as_deref())?;
 
     tx.send(Event::Thinking(format!(
         "Opening SSH session to `{host}` in a new terminal window..."
     )))?;
 
     let mut ssh_args = vec![host.clone()];
-    if let Some(ref identity) = action.ssh_file {
+    if let Some(ref identity) = payload.ssh_file {
         let path = utils::expand_home(identity);
         ssh_args.push("-i".to_string());
         ssh_args.push(path.to_string_lossy().to_string());
@@ -266,13 +268,15 @@ pub async fn handle_connect(tx: Sender<Bytes>, action: ConnectAction) -> Result<
 }
 
 #[log()]
-pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
-    let host = utils::resolve_host(action.host.as_deref())?;
+pub async fn handle_info(tx: Sender<Bytes>, query: ToolQuery<InfoAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let host = utils::resolve_host(payload.host.as_deref())?;
 
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, payload.ssh_file.as_deref()).await?;
 
     tx.send(Event::Thinking(
         "Fetching OS info, uptime, and load average...".into(),
@@ -351,16 +355,18 @@ pub async fn handle_info(tx: Sender<Bytes>, action: InfoAction) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
-    let host = utils::resolve_host(action.host.as_deref())?;
-    let identity = action.ssh_file.as_deref();
+pub async fn handle_user(tx: Sender<Bytes>, query: ToolQuery<UserAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let host = utils::resolve_host(payload.host.as_deref())?;
+    let identity = payload.ssh_file.as_deref();
 
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for user management..."
     )))?;
     let mut conn = SshConnection::connect(&host, identity).await?;
 
-    match action.action.as_str() {
+    match payload.action.as_str() {
         "list" => {
             tx.send(Event::Thinking(
                 "Fetching user list from /etc/passwd...".into(),
@@ -378,7 +384,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "create" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
@@ -387,7 +393,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
                 "Creating user `{user}` on `{host}`..."
             )))?;
             let mut cmd = format!("sudo useradd -m -s /bin/bash '{user}'");
-            if action.sudo.unwrap_or(false) {
+            if payload.sudo.unwrap_or(false) {
                 cmd.push_str(&format!(" && sudo usermod -aG sudo '{user}'"));
             }
             conn.exec(&cmd).await?;
@@ -397,7 +403,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "remove" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
@@ -437,11 +443,11 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "add_ssh_key" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing `username` parameter".into()))?;
-            let pubkey = action
+            let pubkey = payload
                 .pubkey
                 .ok_or_else(|| Error::Custom("Missing pubkey parameter".into()))?;
 
@@ -453,11 +459,11 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "add_ssh_key_from_file" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
-            let raw_path = action
+            let raw_path = payload
                 .key_path
                 .ok_or_else(|| Error::Custom("Missing key_path parameter".into()))?;
             let path = utils::expand_home(&raw_path);
@@ -485,7 +491,7 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "generate_ssh_key" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
@@ -542,11 +548,11 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
         }
 
         "set_sudo" => {
-            let user = action
+            let user = payload
                 .username
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
-            let grant = action
+            let grant = payload
                 .sudo
                 .ok_or_else(|| Error::Custom("Missing 'sudo' boolean parameter".into()))?;
 
@@ -568,29 +574,31 @@ pub async fn handle_user(tx: Sender<Bytes>, action: UserAction) -> Result<()> {
             tx.send(Event::Answer(msg))?;
         }
 
-        _ => return Err(Error::Custom("Invalid user action.".into()).into()),
+        _ => return Err(Error::Custom("Invalid user payload.".into()).into()),
     }
 
     info!(
         "Completed user action '{}' for host '{host}'.",
-        action.action
+        payload.action
     );
     Ok(())
 }
 
 #[log()]
-pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Result<()> {
-    let host = utils::resolve_host(action.host.as_deref())?;
+pub async fn handle_transfer(tx: Sender<Bytes>, query: ToolQuery<TransferAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let host = utils::resolve_host(payload.host.as_deref())?;
 
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for file transfer..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, payload.ssh_file.as_deref()).await?;
 
-    let local_path = utils::expand_home(&action.local_path);
-    let remote_path = action.remote_path.as_str();
+    let local_path = utils::expand_home(&payload.local_path);
+    let remote_path = payload.remote_path.as_str();
 
-    match action.direction.as_str() {
+    match payload.direction.as_str() {
         "upload" => {
             tx.send(Event::Thinking(format!(
                 "Reading local file `{}`...",
@@ -652,32 +660,34 @@ pub async fn handle_transfer(tx: Sender<Bytes>, action: TransferAction) -> Resul
 
     info!(
         "Completed file transfer ({}) for host '{host}'.",
-        action.direction
+        payload.direction
     );
     Ok(())
 }
 
 #[log()]
-pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<()> {
-    let host = utils::resolve_host(action.host.as_deref())?;
+pub async fn handle_sync(tx: Sender<Bytes>, query: ToolQuery<SyncConfigAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let host = utils::resolve_host(payload.host.as_deref())?;
 
     tx.send(Event::Thinking(format!(
         "Connecting to `{host}` via SSH for config sync..."
     )))?;
-    let mut conn = SshConnection::connect(&host, action.ssh_file.as_deref()).await?;
+    let mut conn = SshConnection::connect(&host, payload.ssh_file.as_deref()).await?;
 
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
 
-    let (local_rel, remote_rel) = utils::get_editor_paths(&action.editor)?;
+    let (local_rel, remote_rel) = utils::get_editor_paths(&payload.editor)?;
     let local_full = PathBuf::from(home).join(local_rel);
 
-    match action.direction.as_str() {
+    match payload.direction.as_str() {
         "push" => {
             tx.send(Event::Thinking(format!(
                 "Reading local `{}` config from `{}`...",
-                action.editor,
+                payload.editor,
                 local_full.display()
             )))?;
             if local_full.is_file() {
@@ -686,7 +696,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
 
                 tx.send(Event::Thinking(format!(
                     "Pushing `{}` config to `{host}`...",
-                    action.editor
+                    payload.editor
                 )))?;
                 let cmd = format!(
                     "mkdir -p $(dirname '~/{remote_rel}') && echo '{encoded}' | base64 -d > '~/{remote_rel}'"
@@ -704,7 +714,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
         "pull" => {
             tx.send(Event::Thinking(format!(
                 "Pulling `{}` config from `{host}`...",
-                action.editor,
+                payload.editor,
             )))?;
             let cmd = format!("base64 '~/{remote_rel}'");
             let output = conn.exec(&cmd).await?;
@@ -712,7 +722,7 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
 
             tx.send(Event::Thinking(format!(
                 "Decoding and saving `{}` config to `{}`...",
-                action.editor,
+                payload.editor,
                 local_full.display()
             )))?;
             let decoded = BASE64
@@ -730,21 +740,23 @@ pub async fn handle_sync(tx: Sender<Bytes>, action: SyncConfigAction) -> Result<
 
     let msg = format!(
         "Successfully synchronized `{}` config (`{}`) with `{host}`.",
-        action.editor, action.direction
+        payload.editor, payload.direction
     );
     tx.send(Event::Answer(msg))?;
 
     info!(
         "Completed config sync for editor '{}' ({}) with host '{host}'.",
-        action.editor, action.direction
+        payload.editor, payload.direction
     );
     Ok(())
 }
 
 #[log()]
-pub async fn handle_ping(tx: Sender<Bytes>, action: PingAction) -> Result<()> {
-    let target = utils::resolve_host_target(&action.target, &action.ip)?;
-    let count = action.count.unwrap_or(4);
+pub async fn handle_ping(tx: Sender<Bytes>, query: ToolQuery<PingAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let target = utils::resolve_host_target(&payload.target, &payload.ip)?;
+    let count = payload.count.unwrap_or(4);
 
     tx.send(Event::Thinking(format!(
         "Executing ICMP ping to `{target}` ({count} packets)..."
@@ -822,8 +834,10 @@ pub async fn handle_ping(tx: Sender<Bytes>, action: PingAction) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_trace(tx: Sender<Bytes>, action: TraceAction) -> Result<()> {
-    let target = utils::resolve_host_target(&action.target, &action.ip)?;
+pub async fn handle_trace(tx: Sender<Bytes>, query: ToolQuery<TraceAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let target = utils::resolve_host_target(&payload.target, &payload.ip)?;
 
     tx.send(Event::Thinking(format!(
         "Checking for `traceroute` availability..."
@@ -890,9 +904,11 @@ pub async fn handle_trace(tx: Sender<Bytes>, action: TraceAction) -> Result<()> 
 }
 
 #[log()]
-pub async fn handle_route(tx: Sender<Bytes>, action: RouteAction) -> Result<()> {
-    let target = utils::resolve_host_target(&action.target, &action.ip)?;
-    let count = action.count.unwrap_or(10);
+pub async fn handle_route(tx: Sender<Bytes>, query: ToolQuery<RouteAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    let target = utils::resolve_host_target(&payload.target, &payload.ip)?;
+    let count = payload.count.unwrap_or(10);
 
     tx.send(Event::Thinking(format!(
         "Checking for `mtr` availability..."
@@ -982,18 +998,20 @@ pub async fn handle_route(tx: Sender<Bytes>, action: RouteAction) -> Result<()> 
 }
 
 #[log()]
-pub async fn handle_tunnel(tx: Sender<Bytes>, action: TunnelAction) -> Result<()> {
-    let port = action.port.unwrap_or(1080);
-    let vps = utils::resolve_host(action.host.as_deref())?;
+pub async fn handle_tunnel(tx: Sender<Bytes>, query: ToolQuery<TunnelAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
 
-    match action.action.as_str() {
+    let port = payload.port.unwrap_or(1080);
+    let vps = utils::resolve_host(payload.host.as_deref())?;
+
+    match payload.action.as_str() {
         "start" => {
             let addr = format!("127.0.0.1:{port}");
             let listener = TcpListener::bind(&addr).await.map_err(|e| {
                 Error::Custom(format!("Port {port} is already in use or bind failed: {e}"))
             })?;
 
-            let conn = utils::SshConnection::connect(&vps, action.ssh_file.as_deref()).await?;
+            let conn = utils::SshConnection::connect(&vps, payload.ssh_file.as_deref()).await?;
             let session = Arc::new(conn.session);
 
             let (stop_tx, mut stop_rx) = atoman::oneshot_channel::<()>();

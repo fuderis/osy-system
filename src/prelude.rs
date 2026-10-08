@@ -2,7 +2,7 @@
 
 // Domain crates
 pub use crate::{config::Config, error::Error};
-pub use osy_share::{DialogEvent, Event, Id};
+pub use osy_share::{DialogEvent, Event, Id, ToolQuery};
 
 // Basic primitives
 pub use atoman::{

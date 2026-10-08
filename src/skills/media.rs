@@ -114,13 +114,15 @@ pub struct SeekAction {
     pub seconds: u32,
 }
 
-#[log(volume = %action.volume)]
-pub async fn handle_set(tx: Sender<Bytes>, action: SetVolumeAction) -> Result<()> {
-    match AudioControl::set_volume(action.volume).await {
+#[log(volume = %query.payload.volume)]
+pub async fn handle_set(tx: Sender<Bytes>, query: ToolQuery<SetVolumeAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match AudioControl::set_volume(payload.volume).await {
         Ok(_) => {
             let msg = str!(
                 "Audio volume updated successfully. Current volume: `{}%`.",
-                action.volume
+                payload.volume
             );
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -130,9 +132,11 @@ pub async fn handle_set(tx: Sender<Bytes>, action: SetVolumeAction) -> Result<()
     }
 }
 
-#[log(amount = %action.amount)]
-pub async fn handle_increase(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Result<()> {
-    match AudioControl::increase_volume(action.amount).await {
+#[log(amount = %query.payload.amount)]
+pub async fn handle_increase(tx: Sender<Bytes>, query: ToolQuery<DeltaVolumeAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match AudioControl::increase_volume(payload.amount).await {
         Ok(volume) => {
             let msg =
                 format!("The audio volume increased successfully. Current volume: `{volume}%`.",);
@@ -144,9 +148,11 @@ pub async fn handle_increase(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Re
     }
 }
 
-#[log(amount = %action.amount)]
-pub async fn handle_decrease(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Result<()> {
-    match AudioControl::decrease_volume(action.amount).await {
+#[log(amount = %query.payload.amount)]
+pub async fn handle_decrease(tx: Sender<Bytes>, query: ToolQuery<DeltaVolumeAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match AudioControl::decrease_volume(payload.amount).await {
         Ok(volume) => {
             let msg =
                 format!("The audio volume decreased successfully. Current volume: `{volume}%`.",);
@@ -159,7 +165,7 @@ pub async fn handle_decrease(tx: Sender<Bytes>, action: DeltaVolumeAction) -> Re
 }
 
 #[log()]
-pub async fn handle_get(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_get(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match AudioControl::get_volume().await {
         Ok(volume) => {
             let msg = format!("The current audio volume level is `{volume}%`.");
@@ -172,7 +178,7 @@ pub async fn handle_get(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_mute(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_mute(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match AudioControl::set_mute(true).await {
         Ok(_) => {
             let msg = "The audio muted successfully.";
@@ -185,7 +191,7 @@ pub async fn handle_mute(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_unmute(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_unmute(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match AudioControl::set_mute(false).await {
         Ok(_) => {
             let msg = "The audio unmuted successfully.";
@@ -198,7 +204,7 @@ pub async fn handle_unmute(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()>
 }
 
 #[log()]
-pub async fn handle_is_muted(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_is_muted(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match AudioControl::is_muted().await {
         Ok(is_muted) => {
             let msg = if is_muted {
@@ -247,10 +253,12 @@ impl From<MusicAction> for SearchIntent {
 }
 
 #[log()]
-pub async fn handle_search(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
+pub async fn handle_search(tx: Sender<Bytes>, query: ToolQuery<MusicAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     let music_index = music_index().await?;
 
-    let target = music_index.search(action.into());
+    let target = music_index.search(payload.into());
     let tracks = target.tracks();
 
     let msg = if tracks.is_empty() {
@@ -285,10 +293,12 @@ pub async fn handle_search(tx: Sender<Bytes>, action: MusicAction) -> Result<()>
 }
 
 #[log()]
-pub async fn handle_play(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
+pub async fn handle_play(tx: Sender<Bytes>, query: ToolQuery<MusicAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
     let music_index = music_index().await?;
 
-    let target = music_index.search(action.into());
+    let target = music_index.search(payload.into());
     let tracks = target.tracks();
 
     if tracks.is_empty() {
@@ -315,7 +325,7 @@ pub async fn handle_play(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
 
 // #[cfg(target_os = "linux")]
 // #[log()]
-// pub async fn handle_media_play(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+// pub async fn handle_media_play(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
 //     match MediaControl::play().await {
 //         Ok(_) => {
 //             let msg = "Media playback started successfully.";
@@ -329,7 +339,7 @@ pub async fn handle_play(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
 
 // #[cfg(target_os = "linux")]
 // #[log()]
-// pub async fn handle_media_pause(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+// pub async fn handle_media_pause(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
 //     match MediaControl::pause().await {
 //         Ok(_) => {
 //             let msg = "Media playback paused successfully.";
@@ -342,7 +352,10 @@ pub async fn handle_play(tx: Sender<Bytes>, action: MusicAction) -> Result<()> {
 // }
 
 #[log()]
-pub async fn handle_media_play_pause(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_play_pause(
+    tx: Sender<Bytes>,
+    _query: ToolQuery<JsonValue>,
+) -> Result<()> {
     match MediaControl::play_pause().await {
         Ok(_) => {
             let msg = "Media playback toggled successfully.";
@@ -355,7 +368,7 @@ pub async fn handle_media_play_pause(tx: Sender<Bytes>, _payload: JsonValue) -> 
 }
 
 #[log()]
-pub async fn handle_media_stop(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_stop(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match MediaControl::stop().await {
         Ok(_) => {
             let msg = "Media playback stopped successfully.";
@@ -368,7 +381,10 @@ pub async fn handle_media_stop(tx: Sender<Bytes>, _payload: JsonValue) -> Result
 }
 
 #[log()]
-pub async fn handle_media_next_track(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_next_track(
+    tx: Sender<Bytes>,
+    _query: ToolQuery<JsonValue>,
+) -> Result<()> {
     match MediaControl::next_track().await {
         Ok(_) => {
             let msg = "Skipped to the next track successfully.";
@@ -381,7 +397,10 @@ pub async fn handle_media_next_track(tx: Sender<Bytes>, _payload: JsonValue) -> 
 }
 
 #[log()]
-pub async fn handle_media_previous_track(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_previous_track(
+    tx: Sender<Bytes>,
+    _query: ToolQuery<JsonValue>,
+) -> Result<()> {
     match MediaControl::previous_track().await {
         Ok(_) => {
             let msg = "Returned to the previous track successfully.";
@@ -393,13 +412,18 @@ pub async fn handle_media_previous_track(tx: Sender<Bytes>, _payload: JsonValue)
     }
 }
 
-#[log(secs = %action.seconds)]
-pub async fn handle_media_seek_forward(tx: Sender<Bytes>, action: SeekAction) -> Result<()> {
-    match MediaControl::seek_forward(action.seconds).await {
+#[log(secs = %query.payload.seconds)]
+pub async fn handle_media_seek_forward(
+    tx: Sender<Bytes>,
+    query: ToolQuery<SeekAction>,
+) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match MediaControl::seek_forward(payload.seconds).await {
         Ok(_) => {
             let msg = str!(
                 "Media playback advanced by {} seconds successfully.",
-                action.seconds
+                payload.seconds
             );
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -409,13 +433,18 @@ pub async fn handle_media_seek_forward(tx: Sender<Bytes>, action: SeekAction) ->
     }
 }
 
-#[log(secs = %action.seconds)]
-pub async fn handle_media_seek_backward(tx: Sender<Bytes>, action: SeekAction) -> Result<()> {
-    match MediaControl::seek_backward(action.seconds).await {
+#[log(secs = %query.payload.seconds)]
+pub async fn handle_media_seek_backward(
+    tx: Sender<Bytes>,
+    query: ToolQuery<SeekAction>,
+) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match MediaControl::seek_backward(payload.seconds).await {
         Ok(_) => {
             let msg = str!(
                 "Media playback rewound by {} seconds successfully.",
-                action.seconds
+                payload.seconds
             );
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -426,7 +455,7 @@ pub async fn handle_media_seek_backward(tx: Sender<Bytes>, action: SeekAction) -
 }
 
 #[log()]
-pub async fn handle_media_metadata(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_metadata(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match MediaControl::metadata().await {
         Ok(metadata) => {
             let msg = str!(metadata);
@@ -440,7 +469,7 @@ pub async fn handle_media_metadata(tx: Sender<Bytes>, _payload: JsonValue) -> Re
 }
 
 #[log()]
-pub async fn handle_media_position(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_position(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match MediaControl::position().await {
         Ok(position) => {
             let msg = format!("Current playback position: {:?}.", position);
@@ -453,7 +482,7 @@ pub async fn handle_media_position(tx: Sender<Bytes>, _payload: JsonValue) -> Re
 }
 
 #[log()]
-pub async fn handle_media_duration(tx: Sender<Bytes>, _payload: JsonValue) -> Result<()> {
+pub async fn handle_media_duration(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match MediaControl::duration().await {
         Ok(duration) => {
             let msg = format!("Current media duration: {:?}.", duration);

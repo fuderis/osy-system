@@ -27,6 +27,17 @@ pub struct Device {
     pub fsuse_percent: Option<String>,
 }
 
+struct DisplayDevice<'a> {
+    name: &'a str,
+    label: Option<&'a str>,
+    fstype: Option<&'a str>,
+    size: Option<&'a str>,
+    used: Option<String>,
+    free: Option<String>,
+    mount: Option<&'a str>,
+    children: &'a [Device],
+}
+
 pub async fn list_disks() -> Result<Vec<Device>> {
     #[cfg(target_os = "linux")]
     {
@@ -92,4 +103,203 @@ pub fn is_system_disk(dev: &Device) -> bool {
     }
 
     false
+}
+
+fn display_device(dev: &Device) -> DisplayDevice<'_> {
+    fn map_fstype(fstype: Option<&str>) -> Option<&str> {
+        match fstype {
+            Some("crypto_LUKS") => Some("luks"),
+            other => other,
+        }
+    }
+
+    if dev.fstype.as_deref() == Some("crypto_LUKS") && dev.children.len() == 1 {
+        let child = &dev.children[0];
+
+        return DisplayDevice {
+            name: &dev.name,
+            label: child.label.as_deref(),
+            fstype: map_fstype(child.fstype.as_deref()),
+            size: child.size.as_deref(),
+            used: used(child),
+            free: free(child),
+            mount: child.mountpoint.as_deref(),
+            children: &[],
+        };
+    }
+
+    DisplayDevice {
+        name: &dev.name,
+        label: dev.label.as_deref(),
+        fstype: map_fstype(dev.fstype.as_deref()),
+        size: dev.size.as_deref(),
+        used: used(dev),
+        free: free(dev),
+        mount: dev.mountpoint.as_deref(),
+        children: &dev.children,
+    }
+}
+
+fn used(dev: &Device) -> Option<String> {
+    match (&dev.fsused, &dev.fsuse_percent) {
+        (Some(used), Some(percent)) => Some(format!("{used} ({percent})")),
+        (Some(used), None) => Some(used.clone()),
+        _ => None,
+    }
+}
+
+fn free(dev: &Device) -> Option<String> {
+    match (&dev.fsavail, &dev.fsuse_percent) {
+        (Some(free), Some(percent)) => {
+            let p = percent.trim_end_matches('%');
+
+            if let Ok(v) = p.parse::<u8>() {
+                Some(format!("{free} ({}%)", 100 - v))
+            } else {
+                Some(free.clone())
+            }
+        }
+        (Some(free), None) => Some(free.clone()),
+        _ => None,
+    }
+}
+
+pub fn format_disk_tree(devices: &[Device]) -> String {
+    let mut out = String::new();
+    out.push_str("| Name | Label | FS | Size | Used | Free | Mount Point |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
+
+    let len = devices.len();
+    for (i, dev) in devices.iter().enumerate() {
+        let is_last = i + 1 == len;
+        append_device_rows(&mut out, dev, 0, is_last, "");
+    }
+
+    out
+}
+
+fn append_device_rows(out: &mut String, dev: &Device, depth: usize, is_last: bool, prefix: &str) {
+    let d = display_device(dev);
+
+    let branch = if depth > 0 {
+        if is_last { "└ " } else { "├ " }
+    } else {
+        ""
+    };
+
+    let name_field = format!("{}{}{}", prefix, branch, d.name);
+    let is_parent = depth == 0;
+
+    out.push_str(&format!(
+        "| {} | {} | {} | {} | {} | {} | {} |\n",
+        if is_parent {
+            format!("**`{name_field}`**")
+        } else {
+            name_field
+        },
+        if !is_parent {
+            d.label.unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.fstype.map(|s| format!("`{s}`")).unwrap_or("—".into())
+        } else {
+            "".into()
+        },
+        if !is_parent {
+            d.size.unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.used.as_deref().unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.free.as_deref().unwrap_or("—")
+        } else {
+            ""
+        },
+        if !is_parent {
+            d.mount.map(|s| format!("`{s}`")).unwrap_or("—".into())
+        } else {
+            "".into()
+        },
+    ));
+
+    let next_prefix = if depth > 0 {
+        if is_last {
+            format!("{}    ", prefix)
+        } else {
+            format!("{}│   ", prefix)
+        }
+    } else {
+        "".to_string()
+    };
+
+    let children = d.children;
+    let children_len = children.len();
+    for (i, child) in children.iter().enumerate() {
+        let child_is_last = i + 1 == children_len;
+        append_device_rows(out, child, depth + 1, child_is_last, &next_prefix);
+    }
+}
+
+pub fn format_device_info(dev: &Device) -> String {
+    let mut out = String::new();
+
+    let name = &dev.name;
+    let path = dev.path.as_deref().unwrap_or("—");
+    let label = dev.label.as_deref().unwrap_or("—");
+    let uuid = dev.uuid.as_deref().unwrap_or("—");
+    let fstype = dev.fstype.as_deref().unwrap_or("—");
+    let size = dev.size.as_deref().unwrap_or("—");
+    let mountpoint = dev.mountpoint.as_deref().unwrap_or("—");
+    let is_sys = if super::is_system_disk(dev) {
+        "**Yes** (Protected)"
+    } else {
+        "No"
+    };
+
+    let used_val = dev.fsused.as_deref().unwrap_or("—");
+    let usage_pct = dev.fsuse_percent.as_deref().unwrap_or("");
+    let used_str = if usage_pct.is_empty() {
+        used_val.to_string()
+    } else {
+        format!("{used_val} ({usage_pct})")
+    };
+    let avail_str = dev.fsavail.as_deref().unwrap_or("—");
+
+    out.push_str("| Property | Value |\n");
+    out.push_str("|---|---|\n");
+    out.push_str(&format!("| **Device Name** | `{name}` |\n"));
+    out.push_str(&format!("| **Device Path** | `{path}` |\n"));
+    out.push_str(&format!("| **Label** | **{label}** |\n"));
+    out.push_str(&format!("| **UUID** | `{uuid}` |\n"));
+    out.push_str(&format!("| **Filesystem** | `{fstype}` |\n"));
+    out.push_str(&format!("| **Total Size** | {size} |\n"));
+    out.push_str(&format!("| **Used Space** | {used_str} |\n"));
+    out.push_str(&format!("| **Available Space** | {avail_str} |\n"));
+    out.push_str(&format!("| **Mount Point** | `{mountpoint}` |\n"));
+    out.push_str(&format!("| **System Partition** | {is_sys} |\n"));
+
+    if !dev.children.is_empty() {
+        out.push_str("\n#### Partitions / Sub-devices\n\n");
+        out.push_str("| Name | Label | FS | Size | Mount Point |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for child in &dev.children {
+            out.push_str(&format!(
+                "| `{}` | {} | `{}` | {} | `{}` |\n",
+                child.name,
+                child.label.as_deref().unwrap_or("—"),
+                child.fstype.as_deref().unwrap_or("—"),
+                child.size.as_deref().unwrap_or("—"),
+                child.mountpoint.as_deref().unwrap_or("—")
+            ));
+        }
+    }
+
+    out
 }

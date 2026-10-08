@@ -18,11 +18,13 @@ pub struct ThemeAction {
     style: ThemeStyle,
 }
 
-#[log(style = %action.style)]
-pub async fn handle_set(tx: Sender<Bytes>, action: ThemeAction) -> Result<()> {
-    match SystemTheme::switch(action.style.clone()).await {
+#[log(style = %query.payload.style)]
+pub async fn handle_set(tx: Sender<Bytes>, query: ToolQuery<ThemeAction>) -> Result<()> {
+    let ToolQuery { payload, .. } = query;
+
+    match SystemTheme::switch(payload.style.clone()).await {
         Ok(_) => {
-            let msg = format!("System theme switched into `{}` style.", action.style);
+            let msg = format!("System theme switched into `{}` style.", payload.style);
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
             Ok(())
@@ -32,7 +34,7 @@ pub async fn handle_set(tx: Sender<Bytes>, action: ThemeAction) -> Result<()> {
 }
 
 #[log()]
-pub async fn handle_get(tx: Sender<Bytes>, _action: JsonValue) -> Result<()> {
+pub async fn handle_get(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
     match SystemTheme::current().await {
         Ok(style) => {
             let msg = format!("Current system theme: `{style}` style.");
