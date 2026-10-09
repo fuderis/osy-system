@@ -326,7 +326,7 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
             );
         }
 
-        let msg = format!("Successfully formatted `{dev_path}` as {}.", payload.fs);
+        let msg = format!("Formatted `{dev_path}` as {}.", payload.fs);
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())
@@ -457,7 +457,7 @@ pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) ->
             .await;
 
         let msg = format!(
-            "Successfully backed up {total_files} file(s) from `{}` to `{dest_display}`.",
+            "Backed up {total_files} file(s) from `{}` to `{dest_display}`.",
             src_path.display()
         );
         info!("{msg}");

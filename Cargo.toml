@@ -15,8 +15,8 @@
 
 [package]
 name = "osy-system"
-description = "Local system management agent — provides system metrics, appearance changing, power & media control, disks & infrastructure management."
-version = "0.8.4"
+description = "A local system management agent. Provides system metrics, appearance changing, power & media control, disks & infrastructure management."
+version = "0.8.5"
 edition = "2024"
 
 [dependencies]
@@ -25,7 +25,7 @@ osy-skill.path = "../osy-kernel/crates/skill"
 
 atoman = { version = "0.12.1", features = ["full"] }
 macron = { version = "0.5.2", features = ["full"] }
-rigging = { version = "0.5.9", features = ["full"] }
+rigging = { version = "0.5.11", features = ["full"] }
 pearce = { version = "0.6.2", features = ["full"] }
 anylm = { version = "0.4.2", features = ["full"] }
 
