@@ -1,33 +1,10 @@
 use crate::prelude::*;
 
-use anylm::{Schema, api::Tool};
+use anylm::Schema;
 use system_utils::{PowerManager, power::PowerMode};
 
-pub fn tools_list() -> Vec<Tool> {
-    vec![
-        // ________________________________________
-        //              SCHEDULE POWER
-        Tool::typed::<PowerAction>(
-            "schedule",
-            "Schedules or immediately executes a system power action.",
-        ),
-        // ________________________________________
-        //              CANCEL SCHEDULING
-        Tool::new(
-            "cancel",
-            "Cancels the currently scheduled power action if one exists.",
-        ),
-        // ________________________________________
-        //              GET STATUS
-        Tool::new(
-            "status",
-            "Returns the currently scheduled power action and its execution time, if any.",
-        ),
-    ]
-}
-
 #[derive(Deserialize, Schema)]
-pub struct PowerAction {
+pub struct ScheduleAction {
     /// Power action to perform.
     #[schema(serde_json)]
     #[schema(variants = ["shutdown", "reboot", "suspend", "lock", "logout"])]
@@ -38,7 +15,7 @@ pub struct PowerAction {
 }
 
 #[log(mode = %query.payload.mode)]
-pub async fn handle_schedule(tx: Sender<Bytes>, query: ToolQuery<PowerAction>) -> Result<()> {
+pub async fn handle_schedule(tx: Sender<Bytes>, query: ToolQuery<ScheduleAction>) -> Result<()> {
     let ToolQuery { payload, .. } = query;
 
     let local = payload
@@ -67,7 +44,7 @@ pub async fn handle_schedule(tx: Sender<Bytes>, query: ToolQuery<PowerAction>) -
 }
 
 #[log()]
-pub async fn handle_cancel(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_cancel(tx: Sender<Bytes>) -> Result<()> {
     let msg = match PowerManager::cancel().await {
         Some(mode) => format!("Scheduled power action canceled. Canceled action: {mode}."),
         None => "There is no scheduled power payload.".into(),
@@ -79,7 +56,7 @@ pub async fn handle_cancel(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> R
 }
 
 #[log()]
-pub async fn handle_status(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_status(tx: Sender<Bytes>) -> Result<()> {
     let msg = match PowerManager::status().await {
         Some(task) => {
             format!(

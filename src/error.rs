@@ -10,9 +10,6 @@ pub enum Error {
     #[display(fmt = "{0}: {1}")]
     Titled(String, DynError),
 
-    #[display(fmt = "Connection to the client is closed.")]
-    ConnectionClosed,
-
     #[from(skip)]
     #[display(fmt = "A non-existing tool was called `{0}`")]
     UnknownTool(String),

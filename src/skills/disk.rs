@@ -3,44 +3,6 @@ use crate::{
     utils::{self, ToolPkg},
 };
 
-use anylm::{Schema, api::Tool};
-use atoman::process::Command;
-use std::process::Stdio;
-
-pub fn tools_list() -> Vec<Tool> {
-    vec![
-        Tool::new(
-            "list",
-            "Lists all available storage devices, block devices, and their partition tables.",
-        ),
-        Tool::typed::<InfoAction>(
-            "info",
-            "Displays detailed information, parameters, and partition structure for a specific storage device or partition.",
-        ),
-        Tool::typed::<MountAction>(
-            "mount",
-            "Mounts a specific disk partition or block device to a target mount point.",
-        ),
-        Tool::typed::<UnmountAction>("unmount", "Unmounts a mounted disk partition or device."),
-        Tool::typed::<RepairAction>(
-            "repair",
-            "Checks and attempts to repair file system errors on a partition.",
-        ),
-        Tool::typed::<FormatAction>(
-            "format",
-            "Formats a disk partition or drive with the specified file system. WARNING: Deletes all data on target.",
-        ),
-        Tool::typed::<BackupAction>(
-            "backup",
-            "Backs up the current working directory or a specified file/directory to a target storage device, excluding build artifacts (e.g. target, node_modules).",
-        ),
-    ]
-}
-
-// ============================================================================
-// DTO STRUCTS
-// ============================================================================
-
 #[derive(Debug, Deserialize, Schema)]
 pub struct InfoAction {
     /// Path, name, UUID, label, or mount point of the target device (e.g., 'sdb1', '/dev/sdb1', or 'DATA').
@@ -56,7 +18,7 @@ pub struct MountAction {
 }
 
 #[derive(Debug, Deserialize, Schema)]
-pub struct UnmountAction {
+pub struct UmountAction {
     /// Path, name, UUID, label, or mount point of the device to unmount.
     pub target: String,
 }
@@ -86,12 +48,8 @@ pub struct BackupAction {
     pub target: Option<String>,
 }
 
-// ============================================================================
-// HANDLERS
-// ============================================================================
-
 #[log()]
-pub async fn handle_list(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_list(tx: Sender<Bytes>) -> Result<()> {
     match utils::list_disks().await {
         Ok(devices) => {
             let msg = utils::format_disk_tree(&devices);
@@ -153,11 +111,14 @@ pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> R
         let mount_path = utils::build_mount_path(&dev, payload.point.as_deref());
         let fstype = dev.fstype.as_deref();
 
+        // Ensure mount directory exists
+        let _ = Dialog::script(&tx, format!("mkdir -p \"{mount_path}\""), false).await;
+
+        let fstype_flag = fstype.map(|t| format!("-t {t}")).unwrap_or_default();
+
         // 1. RW attempt
-        if utils::try_mount_rw(dev_path, &mount_path, fstype)
-            .await
-            .is_ok()
-        {
+        let mount_rw_cmd = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
+        if Dialog::script(&tx, mount_rw_cmd, true).await?.success {
             let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -165,13 +126,12 @@ pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> R
         }
 
         // 2. Automatic repair
-        let _ = utils::perform_repair(&payload.target).await;
+        let repair_cmd = format!("fsck -y \"{dev_path}\"");
+        let _ = Dialog::script(&tx, repair_cmd, true).await;
 
         // 3. Retry RW
-        if utils::try_mount_rw(dev_path, &mount_path, fstype)
-            .await
-            .is_ok()
-        {
+        let mount_rw_retry = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
+        if Dialog::script(&tx, mount_rw_retry, true).await?.success {
             let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -179,10 +139,8 @@ pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> R
         }
 
         // 4. Fallback RO
-        if utils::try_mount_ro(dev_path, &mount_path, fstype)
-            .await
-            .is_ok()
-        {
+        let mount_ro_cmd = format!("mount -o ro {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
+        if Dialog::script(&tx, mount_ro_cmd, true).await?.success {
             let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
             info!("{msg}");
             tx.send(Event::Answer(msg))?;
@@ -199,12 +157,26 @@ pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> R
 }
 
 #[log(target = %query.payload.target)]
-pub async fn handle_unmount(tx: Sender<Bytes>, query: ToolQuery<UnmountAction>) -> Result<()> {
+pub async fn handle_umount(tx: Sender<Bytes>, query: ToolQuery<UmountAction>) -> Result<()> {
     let ToolQuery { payload, .. } = query;
 
     #[cfg(target_os = "linux")]
     {
-        let msg = utils::perform_unmount(&payload.target).await?;
+        let dev = utils::find_disk(&payload.target).await?;
+        let target_path = dev.path.as_deref().unwrap_or(&payload.target);
+
+        let umount_cmd = format!("umount \"{target_path}\"");
+        let result = Dialog::script(&tx, umount_cmd, true).await?;
+
+        if !result.success {
+            return Err(Error::Custom(format!(
+                "Failed to unmount `{target_path}`: {}",
+                result.stderr
+            ))
+            .into());
+        }
+
+        let msg = format!("Successfully unmounted `{target_path}`.");
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())
@@ -222,7 +194,21 @@ pub async fn handle_repair(tx: Sender<Bytes>, query: ToolQuery<RepairAction>) ->
 
     #[cfg(target_os = "linux")]
     {
-        let msg = utils::perform_repair(&payload.target).await?;
+        let dev = utils::find_disk(&payload.target).await?;
+        let target_path = dev.path.as_deref().unwrap_or(&payload.target);
+
+        let repair_cmd = format!("fsck -y \"{target_path}\"");
+        let result = Dialog::script(&tx, repair_cmd, true).await?;
+
+        if !result.success && result.exit_code > 1 {
+            return Err(Error::Custom(format!(
+                "Repair failed on `{target_path}`: {}",
+                result.stderr
+            ))
+            .into());
+        }
+
+        let msg = format!("Repair check completed on `{target_path}`.");
         info!("{msg}");
         tx.send(Event::Answer(msg))?;
         Ok(())
@@ -256,28 +242,19 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
             None => return Err(Error::Custom(str!("Device path is missing.")).into()),
         };
 
-        // creating confirmation dialog
-        let d_event_id = Id::new().to_string();
-        let d_event = DialogEvent::Confirm {
-            id: d_event_id.clone(),
-            prompt: format!(
+        // request confirmation via Dialog::confirm helper
+        let confirmation = Dialog::confirm(
+            &tx,
+            format!(
                 "Are you sure to format device `{dev_path}` as `{fs}`? **ALL DATA WILL BE LOST!**",
                 fs = payload.fs,
             ),
-            default: Some(Confirmation::No),
-        };
-
-        // register callback and send Event::Dialog
-        let mut callback = Callback::register(&d_event_id).await;
-        tx.send(Event::Dialog(d_event))?;
-
-        let confirmation = atoman::select! {
-            _ = tx.closed() => return Err(Error::ConnectionClosed.into()),
-            res = callback.recv::<Confirmation>(Duration::from_secs(120)) => res?,
-        };
+            Some(Confirmation::No),
+        )
+        .await?;
 
         match confirmation {
-            None | Some(Confirmation::No) => {
+            Confirmation::No => {
                 let msg = "Format operation was cancelled by the user.".to_string();
                 tx.send(Event::Answer(msg))?;
                 return Ok(());
@@ -285,9 +262,9 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
             _ => {} // User has confirmed — continue the operation
         }
 
-        // performing unmounting and formatting
+        // performing unmounting if mounted
         if dev.mountpoint.is_some() {
-            let _ = utils::perform_unmount(&payload.target).await;
+            let _ = Dialog::script(&tx, format!("umount \"{dev_path}\""), true).await;
         }
 
         let (tool, pkg) = match payload.fs.as_str() {
@@ -301,29 +278,25 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
 
         utils::ensure_tool(&ToolPkg { tool, package: pkg }).await?;
 
-        let mut args = vec!["-n", tool];
+        let mut cmd_str = format!("{tool} ");
         if let Some(ref label) = payload.label {
             match payload.fs.as_str() {
                 "ext4" | "btrfs" | "ntfs" | "vfat" | "exfat" => {
-                    args.push("-L");
-                    args.push(label.as_str());
+                    cmd_str.push_str(&format!("-L \"{label}\" "));
                 }
                 _ => {}
             }
         }
-        args.push(dev_path);
+        cmd_str.push_str(&format!("\"{dev_path}\""));
 
-        let status = Command::new("sudo")
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .status()
-            .await?;
+        let result = Dialog::script(&tx, cmd_str, true).await?;
 
-        if !status.success() {
-            return Err(
-                Error::Custom(format!("Failed to format `{dev_path}` as {}", payload.fs)).into(),
-            );
+        if !result.success {
+            return Err(Error::Custom(format!(
+                "Failed to format `{dev_path}` as {}: {}",
+                payload.fs, result.stderr
+            ))
+            .into());
         }
 
         let msg = format!("Formatted `{dev_path}` as {}.", payload.fs);
@@ -379,7 +352,21 @@ pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) ->
             PathBuf::from(mp)
         } else {
             let mount_str = utils::build_mount_path(&dev, None);
-            utils::try_mount_rw(dev_path, &mount_str, dev.fstype.as_deref()).await?;
+            let _ = Dialog::script(&tx, format!("mkdir -p \"{mount_str}\""), false).await;
+            let fstype_flag = dev
+                .fstype
+                .as_deref()
+                .map(|t| format!("-t {t}"))
+                .unwrap_or_default();
+            let mount_cmd = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_str}\"");
+            let res = Dialog::script(&tx, mount_cmd, true).await?;
+            if !res.success {
+                return Err(Error::Custom(format!(
+                    "Failed to mount backup target: {}",
+                    res.stderr
+                ))
+                .into());
+            }
             PathBuf::from(mount_str)
         };
 
@@ -442,19 +429,8 @@ pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) ->
         }
 
         let (uid, gid) = utils::resolve_target_uid_gid(&mount_path_buf.to_string_lossy());
-
-        let _ = atoman::Command::new("sudo")
-            .args([
-                "-n",
-                "chown",
-                "-R",
-                &format!("{uid}:{gid}"),
-                &root_folder.to_string_lossy(),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let chown_cmd = format!("chown -R {uid}:{gid} \"{}\"", root_folder.to_string_lossy());
+        let _ = Dialog::script(&tx, chown_cmd, true).await;
 
         let msg = format!(
             "Backed up {total_files} file(s) from `{}` to `{dest_display}`.",

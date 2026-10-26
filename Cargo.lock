@@ -156,13 +156,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d4929ea9d85cf6795c1878e38c2c0a669d2e99831ffe05f247b99da1025904a"
 dependencies = [
  "anylm-schema",
- "atoman 0.12.1",
+ "atoman 0.12.2",
  "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",
  "macron 0.5.2",
- "pearce",
+ "pearce 0.6.2",
  "regex",
  "serde",
  "serde_json",
@@ -254,9 +254,9 @@ dependencies = [
 
 [[package]]
 name = "atoman"
-version = "0.12.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "233e63e5f936426fa9d79ecce234cbf2dcf1ae9f13fec4f25b4961ce40ffc69a"
+checksum = "ef85de290df75bd9b647642db8196897a4d22dfb532a1b3191c1b1fe42d9e88b"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2506,9 +2506,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -3558,10 +3558,10 @@ name = "osy-share"
 version = "0.0.0"
 dependencies = [
  "anylm",
- "atoman 0.12.1",
+ "atoman 0.12.2",
  "chrono",
  "macron 0.5.2",
- "pearce",
+ "pearce 0.7.0",
  "rand 0.10.3",
  "rigging",
  "serde",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "osy-skill"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3581,10 +3581,10 @@ dependencies = [
 
 [[package]]
 name = "osy-system"
-version = "0.8.5"
+version = "0.9.0"
 dependencies = [
  "anylm",
- "atoman 0.12.1",
+ "atoman 0.12.2",
  "base64 0.23.1",
  "chrono",
  "libc",
@@ -3592,7 +3592,7 @@ dependencies = [
  "music-index",
  "osy-share",
  "osy-skill",
- "pearce",
+ "pearce 0.7.0",
  "rand 0.10.3",
  "regex",
  "rigging",
@@ -3781,7 +3781,24 @@ version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "615f778674dc0ed3d5ed4128cdb60c3f89b45c47142672ce79346bede772bdf6"
 dependencies = [
- "atoman 0.12.1",
+ "atoman 0.12.2",
+ "bytes",
+ "futures",
+ "hyper",
+ "macron 0.5.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "pearce"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc9ed14bf7dd66cb31e671e58ba4d90b900f9a9688b453033e48ccc068bc1b17"
+dependencies = [
+ "atoman 0.12.2",
  "axum",
  "bytes",
  "futures",
@@ -3791,7 +3808,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tokio",
  "tower",
  "urlencoding",
  "validator",

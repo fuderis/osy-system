@@ -3,63 +3,13 @@ use crate::{
     utils::{self, SshConnection},
 };
 
-use anylm::{Schema, api::Tool};
 use atoman::{
     Command, fs,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpListener,
+    io::{AsyncBufReadExt, BufReader},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use russh_keys::ssh_key::rand_core::OsRng;
 use std::process::Stdio;
-
-// Registry to keep track of active tunnel cancellation channels by local port
-static ACTIVE_TUNNELS: SharedMap<u16, Sender<()>> = SharedMap::new();
-
-pub fn tools_list() -> Vec<Tool> {
-    vec![
-        Tool::typed::<ConnectAction>(
-            "connect",
-            "Opens an interactive SSH session to a remote VPS in a new terminal window.",
-        ),
-        Tool::typed::<InfoAction>(
-            "info",
-            "Fetches diagnostics, CPU/RAM usage, active services, and OS stats from a remote VPS.",
-        ),
-        Tool::typed::<UserAction>(
-            "user",
-            "Comprehensive user and SSH key lifecycle management on target Linux VPS.",
-        ),
-        Tool::typed::<TransferAction>(
-            "transfer",
-            "Uploads or downloads files/directories over SSH.",
-        ),
-        Tool::typed::<SyncConfigAction>(
-            "sync",
-            "Synchronizes editor configurations (Helix, Neovim, Vim) between local machine and VPS.",
-        ),
-        Tool::typed::<PingAction>(
-            "ping",
-            "Measures round-trip latency to a target host using ICMP echo requests.",
-        ),
-        Tool::typed::<TraceAction>(
-            "trace",
-            "Traces the layer-3 network path/hops to a remote host.",
-        ),
-        Tool::typed::<RouteAction>(
-            "route",
-            "Performs continuous network route quality analysis using MTR.",
-        ),
-        Tool::typed::<TunnelAction>(
-            "tunnel",
-            "Manages persistent SOCKS5 SSH proxy tunnel using pure Rust async runtime.",
-        ),
-    ]
-}
-
-// ============================================================================
-// DTO STRUCTS
-// ============================================================================
 
 #[derive(Debug, Deserialize, Schema)]
 pub struct ConnectAction {
@@ -112,7 +62,7 @@ pub struct TransferAction {
 }
 
 #[derive(Debug, Deserialize, Schema)]
-pub struct SyncConfigAction {
+pub struct SyncAction {
     /// Editor to sync.
     #[schema(variants = ["helix", "neovim", "vim"])]
     pub editor: String,
@@ -152,23 +102,6 @@ pub struct RouteAction {
     /// Number of MTR cycles (default: 10).
     pub count: Option<usize>,
 }
-
-#[derive(Debug, Deserialize, Schema)]
-pub struct TunnelAction {
-    /// Tunnel lifecycle action.
-    #[schema(variants = ["start", "stop", "status", "restart"])]
-    action: String,
-    /// Local port to bind (default: 1080).
-    port: Option<u16>,
-    /// Target VPS SSH host. Omit for default.
-    host: Option<String>,
-    /// Path to private SSH key file. Defaults to ~/.ssh/id_ed25519.
-    ssh_file: Option<String>,
-}
-
-// ============================================================================
-// HANDLERS
-// ============================================================================
 
 #[log()]
 pub async fn handle_connect(tx: Sender<Bytes>, query: ToolQuery<ConnectAction>) -> Result<()> {
@@ -408,29 +341,21 @@ pub async fn handle_user(tx: Sender<Bytes>, query: ToolQuery<UserAction>) -> Res
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
 
-            let d_event_id = Id::new().to_string();
-            let d_event = DialogEvent::Confirm {
-                id: d_event_id.clone(),
-                prompt: format!("Are you sure you want to delete user `{user}` from `{host}`?"),
-                default: Some(Confirmation::No),
-            };
+            let confirmation = Dialog::confirm(
+                &tx,
+                format!("Are you sure you want to delete user `{user}` from `{host}`?"),
+                Some(Confirmation::No),
+            )
+            .await?;
 
-            let mut callback = Callback::register(&d_event_id).await;
-            tx.send(Event::Dialog(d_event))?;
-
-            let confirmation = atoman::select! {
-                _ = tx.closed() => return Err(Error::ConnectionClosed.into()),
-                res = callback.recv::<Confirmation>(Duration::from_secs(120)) => res?,
-            };
-
-            if matches!(confirmation, Some(Confirmation::Yes)) {
+            if matches!(confirmation, Confirmation::Yes) {
                 tx.send(Event::Thinking(format!(
                     "Killing active sessions and removing user `{user}` from `{host}`..."
                 )))?;
                 let cleanup_cmd = format!(
                     "sudo pkill -u '{user}' || true; \
-                     sudo systemctl stop user@{user}.service || true; \
-                     sudo userdel -r -f '{user}'"
+             sudo systemctl stop user@{user}.service || true; \
+             sudo userdel -r -f '{user}'"
                 );
 
                 conn.exec(&cleanup_cmd).await?;
@@ -666,7 +591,7 @@ pub async fn handle_transfer(tx: Sender<Bytes>, query: ToolQuery<TransferAction>
 }
 
 #[log()]
-pub async fn handle_sync(tx: Sender<Bytes>, query: ToolQuery<SyncConfigAction>) -> Result<()> {
+pub async fn handle_sync(tx: Sender<Bytes>, query: ToolQuery<SyncAction>) -> Result<()> {
     let ToolQuery { payload, .. } = query;
 
     let host = utils::resolve_host(payload.host.as_deref())?;
@@ -994,170 +919,5 @@ pub async fn handle_route(tx: Sender<Bytes>, query: ToolQuery<RouteAction>) -> R
     }
 
     info!("Executed MTR route analysis to '{target}'.");
-    Ok(())
-}
-
-#[log()]
-pub async fn handle_tunnel(tx: Sender<Bytes>, query: ToolQuery<TunnelAction>) -> Result<()> {
-    let ToolQuery { payload, .. } = query;
-
-    let port = payload.port.unwrap_or(1080);
-    let vps = utils::resolve_host(payload.host.as_deref())?;
-
-    match payload.action.as_str() {
-        "start" => {
-            let addr = format!("127.0.0.1:{port}");
-            let listener = TcpListener::bind(&addr).await.map_err(|e| {
-                Error::Custom(format!("Port {port} is already in use or bind failed: {e}"))
-            })?;
-
-            let conn = utils::SshConnection::connect(&vps, payload.ssh_file.as_deref()).await?;
-            let session = Arc::new(conn.session);
-
-            let (stop_tx, mut stop_rx) = atoman::oneshot_channel::<()>();
-            {
-                if let Some(old_stop_tx) = ACTIVE_TUNNELS.insert(port, stop_tx).await {
-                    old_stop_tx.write().await.send(()).ok();
-                }
-            }
-
-            // spawn async SOCKS5 proxy server task with graceful cancellation support
-            atoman::spawn(async move {
-                loop {
-                    atoman::select! {
-                        _ = &mut stop_rx => {
-                            info!("Shutdown signal received. Stopping SOCKS5 proxy on port `{port}`...");
-                            break;
-                        }
-                        accept_res = listener.accept() => {
-                            let (mut socket, _) = match accept_res {
-                                Ok(res) => res,
-                                Err(e) => {
-                                    error!("Failed to accept TCP connection on port `{port}`: {e}");
-                                    break;
-                                }
-                            };
-
-                            let session_clone = Arc::clone(&session);
-                            atoman::spawn(async move {
-                                // SOCKS5 proxy handshaking
-                                let mut buf = [0u8; 256];
-                                if socket.read_exact(&mut buf[..2]).await.is_err() {
-                                    return;
-                                }
-                                let nmethods = buf[1] as usize;
-                                if socket.read_exact(&mut buf[..nmethods]).await.is_err() {
-                                    return;
-                                }
-                                // NO AUTH response
-                                if socket.write_all(&[0x05, 0x00]).await.is_err() {
-                                    return;
-                                }
-
-                                // SOCKS Request
-                                if socket.read_exact(&mut buf[..4]).await.is_err() {
-                                    return;
-                                }
-                                if buf[1] != 0x01 {
-                                    return; // support only CONNECT
-                                }
-
-                                let target_host = match buf[3] {
-                                    0x01 => {
-                                        // IPv4
-                                        let mut ip = [0u8; 4];
-                                        if socket.read_exact(&mut ip).await.is_err() {
-                                            return;
-                                        }
-                                        std::net::Ipv4Addr::from(ip).to_string()
-                                    }
-                                    0x03 => {
-                                        // Domain
-                                        let mut len = [0u8; 1];
-                                        if socket.read_exact(&mut len).await.is_err() {
-                                            return;
-                                        }
-                                        let mut domain = vec![0u8; len[0] as usize];
-                                        if socket.read_exact(&mut domain).await.is_err() {
-                                            return;
-                                        }
-                                        String::from_utf8_lossy(&domain).to_string()
-                                    }
-                                    _ => return,
-                                };
-
-                                let mut port_buf = [0u8; 2];
-                                if socket.read_exact(&mut port_buf).await.is_err() {
-                                    return;
-                                }
-                                let target_port = u16::from_be_bytes(port_buf);
-
-                                // open SSH Direct TCP/IP channel to target host
-                                if let Ok(channel) = session_clone
-                                    .channel_open_direct_tcpip(
-                                        &target_host,
-                                        target_port as u32,
-                                        "127.0.0.1",
-                                        0,
-                                    )
-                                    .await
-                                {
-                                    // send success response for SOCKS5
-                                    let _ = socket
-                                        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                                        .await;
-
-                                    let (mut reader, mut writer) = socket.split();
-                                    let mut channel_stream = channel.into_stream();
-
-                                    let _ = atoman::io::copy_bidirectional(
-                                        &mut channel_stream,
-                                        &mut atoman::io::join(&mut reader, &mut writer),
-                                    )
-                                    .await;
-                                }
-                            });
-                        }
-                    }
-                }
-                info!("SOCKS5 Proxy loop exited for port `{port}`.");
-            });
-
-            tx.send(Event::Answer(format!(
-                "SOCKS5 Proxy listening locally on `127.0.0.1:{port}` via `{vps}`."
-            )))?;
-        }
-        "stop" => {
-            let msg = if let Some(stop_tx) = ACTIVE_TUNNELS.remove(&port).await {
-                let _ = stop_tx.write().await.send(());
-                info!("Signal sent to stop proxy listener on port `{port}`.");
-                format!("Successfully stopped SOCKS5 proxy tunnel on port `{port}`.")
-            } else {
-                warn!("Stop requested, but no active tunnel found registered on port `{port}`");
-                format!("No active proxy tunnel found running on port `{port}`.")
-            };
-
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-        }
-        "status" => {
-            let is_registered = ACTIVE_TUNNELS.get(&port).await.is_some();
-            let addr = format!("127.0.0.1:{port}");
-            let is_port_bound = TcpListener::bind(&addr).await.is_err();
-
-            let msg = if is_registered || is_port_bound {
-                format!(
-                    "Tunnel status for port `{port}`: **ACTIVE** (Port occupied by active SOCKS5 worker)"
-                )
-            } else {
-                format!("No active proxy tunnel found listening on port `{port}`.")
-            };
-
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-        }
-        _ => return Err(Error::Custom("Invalid tunnel action".into()).into()),
-    }
-
     Ok(())
 }

@@ -59,22 +59,19 @@ async fn main() -> Result<()> {
 async fn serve(_: CommandContext) -> Result<()> {
     use handlers as hands;
 
-    let (sock_name, sock_path) = {
-        let meta = AgentMeta::get();
-        (meta.sock_name.clone(), meta.sock_path.clone())
-    };
-
-    // start server:
+    let sock_path = AgentMeta::get().sock_path.clone();
     info!("Launching on `{}`...", sock_path.display());
+
+    // start server
     Server::new()
         //    HEALTH
-        .get("/ping", hands::health::handle_ping)
+        .get("/ping", hands::handle_ping)
         .get("/refresh", hands::handle_refresh)
         //    SKILLS
         .post("/skills/list", hands::handle_skills_list)
         .post("/skills/{skill}/tools", hands::handle_tools_list)
         .post("/skills/{skill}/call/{tool}", hands::handle_tool_call)
         .callback(true)
-        .run(sock_name)
+        .run(sock_path)
         .await
 }

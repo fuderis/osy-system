@@ -1,35 +1,11 @@
 use crate::prelude::*;
 
-use anylm::api::Tool;
 use system_utils::SystemMonitor;
 
 static SYSTEM_MONITOR: State<SystemMonitor> = State::default();
 
-pub fn tools_list() -> Vec<Tool> {
-    vec![
-        // ________________________________________
-        //              BASIC INFO
-        Tool::new(
-            "system",
-            "Returns static system information including operating system, CPU, GPU, RAM, motherboard, storage devices, and other hardware details.",
-        ),
-        // ________________________________________
-        //              SYSTEM METRICS
-        Tool::new(
-            "metrics",
-            "Returns current live system metrics including CPU usage, memory usage, temperatures, disk usage, network activity and other runtime statistics.",
-        ),
-        // ________________________________________
-        //              DEVICES LIST
-        Tool::new(
-            "devices",
-            "Returns a formatted list of currently connected hardware devices.",
-        ),
-    ]
-}
-
 #[log()]
-pub async fn handle_system(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_system(tx: Sender<Bytes>) -> Result<()> {
     let info = SYSTEM_MONITOR.lock().await.info();
     let msg = str!(info);
 
@@ -38,7 +14,7 @@ pub async fn handle_system(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> R
 }
 
 #[log()]
-pub async fn handle_metrics(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_metrics(tx: Sender<Bytes>) -> Result<()> {
     let metrics = SYSTEM_MONITOR
         .lock()
         .await
@@ -51,7 +27,7 @@ pub async fn handle_metrics(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> 
 }
 
 #[log()]
-pub async fn handle_devices(tx: Sender<Bytes>, _query: ToolQuery<JsonValue>) -> Result<()> {
+pub async fn handle_devices(tx: Sender<Bytes>) -> Result<()> {
     let devices = SYSTEM_MONITOR
         .lock()
         .await
