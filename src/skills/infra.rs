@@ -341,30 +341,38 @@ pub async fn handle_user(tx: Sender<Bytes>, query: ToolQuery<UserAction>) -> Res
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
 
-            let confirmation = Dialog::confirm(
+            let confirmation = match Dialog::confirm(
                 &tx,
                 format!("Are you sure you want to delete user `{user}` from `{host}`?"),
                 Some(Confirmation::No),
+                Duration::from_secs(120),
             )
-            .await?;
+            .await?
+            {
+                Some(res) => res,
+                None => {
+                    return Err(Error::OperationTimeout.into());
+                }
+            };
 
-            if matches!(confirmation, Confirmation::Yes) {
-                tx.send(Event::Thinking(format!(
-                    "Killing active sessions and removing user `{user}` from `{host}`..."
-                )))?;
-                let cleanup_cmd = format!(
-                    "sudo pkill -u '{user}' || true; \
-             sudo systemctl stop user@{user}.service || true; \
-             sudo userdel -r -f '{user}'"
-                );
-
-                conn.exec(&cleanup_cmd).await?;
-                tx.send(Event::Answer(format!(
-                    "Active sessions killed and user `{user}` removed successfully from `{host}`."
-                )))?;
-            } else {
+            if matches!(confirmation, Confirmation::No) {
                 tx.send(Event::Answer("User removal cancelled.".to_string()))?;
+                return Ok(());
             }
+
+            tx.send(Event::Thinking(format!(
+                "Killing active sessions and removing user `{user}` from `{host}`..."
+            )))?;
+            let cleanup_cmd = format!(
+                "sudo pkill -u '{user}' || true; \
+                     sudo systemctl stop user@{user}.service || true; \
+                     sudo userdel -r -f '{user}'"
+            );
+
+            conn.exec(&cleanup_cmd).await?;
+            tx.send(Event::Answer(format!(
+                "Active sessions killed and user `{user}` removed successfully from `{host}`."
+            )))?;
         }
 
         "add_ssh_key" => {

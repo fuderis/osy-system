@@ -112,39 +112,66 @@ pub async fn handle_mount(tx: Sender<Bytes>, query: ToolQuery<MountAction>) -> R
         let fstype = dev.fstype.as_deref();
 
         // Ensure mount directory exists
-        let _ = Dialog::script(&tx, format!("mkdir -p \"{mount_path}\""), false).await;
+        let _ = Dialog::script(
+            &tx,
+            format!("mkdir -p \"{mount_path}\""),
+            false,
+            Duration::from_secs(120),
+        )
+        .await;
 
         let fstype_flag = fstype.map(|t| format!("-t {t}")).unwrap_or_default();
 
         // 1. RW attempt
         let mount_rw_cmd = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
-        if Dialog::script(&tx, mount_rw_cmd, true).await?.success {
-            let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-            return Ok(());
+        match Dialog::script(&tx, mount_rw_cmd, true, Duration::from_secs(120)).await? {
+            Some(result) => {
+                if result.success {
+                    let msg = format!("Mounted `{dev_path}` at `{mount_path}`.");
+                    info!("{msg}");
+                    tx.send(Event::Answer(msg))?;
+                    return Ok(());
+                }
+            }
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
         }
 
         // 2. Automatic repair
         let repair_cmd = format!("fsck -y \"{dev_path}\"");
-        let _ = Dialog::script(&tx, repair_cmd, true).await;
+        let _ = Dialog::script(&tx, repair_cmd, true, Duration::from_secs(120)).await;
 
         // 3. Retry RW
         let mount_rw_retry = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
-        if Dialog::script(&tx, mount_rw_retry, true).await?.success {
-            let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-            return Ok(());
+        match Dialog::script(&tx, mount_rw_retry, true, Duration::from_secs(120)).await? {
+            Some(result) => {
+                if result.success {
+                    let msg = format!("Mounted `{dev_path}` at `{mount_path}` after repair.");
+                    info!("{msg}");
+                    tx.send(Event::Answer(msg))?;
+                    return Ok(());
+                }
+            }
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
         }
 
         // 4. Fallback RO
         let mount_ro_cmd = format!("mount -o ro {fstype_flag} \"{dev_path}\" \"{mount_path}\"");
-        if Dialog::script(&tx, mount_ro_cmd, true).await?.success {
-            let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
-            info!("{msg}");
-            tx.send(Event::Answer(msg))?;
-            return Ok(());
+        match Dialog::script(&tx, mount_ro_cmd, true, Duration::from_secs(120)).await? {
+            Some(result) => {
+                if result.success {
+                    let msg = format!("Mounted `{dev_path}` read-only at `{mount_path}`.");
+                    info!("{msg}");
+                    tx.send(Event::Answer(msg))?;
+                    return Ok(());
+                }
+            }
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
         }
 
         Err(Error::Custom(str!("Failed to mount device after repair attempts.")).into())
@@ -166,7 +193,12 @@ pub async fn handle_umount(tx: Sender<Bytes>, query: ToolQuery<UmountAction>) ->
         let target_path = dev.path.as_deref().unwrap_or(&payload.target);
 
         let umount_cmd = format!("umount \"{target_path}\"");
-        let result = Dialog::script(&tx, umount_cmd, true).await?;
+        let result = match Dialog::script(&tx, umount_cmd, true, Duration::from_secs(120)).await? {
+            Some(res) => res,
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
+        };
 
         if !result.success {
             return Err(Error::Custom(format!(
@@ -198,7 +230,12 @@ pub async fn handle_repair(tx: Sender<Bytes>, query: ToolQuery<RepairAction>) ->
         let target_path = dev.path.as_deref().unwrap_or(&payload.target);
 
         let repair_cmd = format!("fsck -y \"{target_path}\"");
-        let result = Dialog::script(&tx, repair_cmd, true).await?;
+        let result = match Dialog::script(&tx, repair_cmd, true, Duration::from_secs(120)).await? {
+            Some(res) => res,
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
+        };
 
         if !result.success && result.exit_code > 1 {
             return Err(Error::Custom(format!(
@@ -250,21 +287,32 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
                 fs = payload.fs,
             ),
             Some(Confirmation::No),
+            Duration::from_secs(120),
         )
         .await?;
 
         match confirmation {
-            Confirmation::No => {
-                let msg = "Format operation was cancelled by the user.".to_string();
-                tx.send(Event::Answer(msg))?;
+            Some(Confirmation::No) => {
+                tx.send(Event::Answer(
+                    "Operation was cancelled by the user.".to_string(),
+                ))?;
                 return Ok(());
+            }
+            None => {
+                return Err(Error::OperationTimeout.into());
             }
             _ => {} // User has confirmed — continue the operation
         }
 
         // performing unmounting if mounted
         if dev.mountpoint.is_some() {
-            let _ = Dialog::script(&tx, format!("umount \"{dev_path}\""), true).await;
+            let _ = Dialog::script(
+                &tx,
+                format!("umount \"{dev_path}\""),
+                true,
+                Duration::from_secs(60),
+            )
+            .await;
         }
 
         let (tool, pkg) = match payload.fs.as_str() {
@@ -289,7 +337,12 @@ pub async fn handle_format(tx: Sender<Bytes>, query: ToolQuery<FormatAction>) ->
         }
         cmd_str.push_str(&format!("\"{dev_path}\""));
 
-        let result = Dialog::script(&tx, cmd_str, true).await?;
+        let result = match Dialog::script(&tx, cmd_str, true, Duration::from_secs(120)).await? {
+            Some(res) => res,
+            None => {
+                return Err(Error::OperationTimeout.into());
+            }
+        };
 
         if !result.success {
             return Err(Error::Custom(format!(
@@ -352,18 +405,30 @@ pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) ->
             PathBuf::from(mp)
         } else {
             let mount_str = utils::build_mount_path(&dev, None);
-            let _ = Dialog::script(&tx, format!("mkdir -p \"{mount_str}\""), false).await;
+            let _ = Dialog::script(
+                &tx,
+                format!("mkdir -p \"{mount_str}\""),
+                false,
+                Duration::from_secs(60),
+            )
+            .await;
             let fstype_flag = dev
                 .fstype
                 .as_deref()
                 .map(|t| format!("-t {t}"))
                 .unwrap_or_default();
             let mount_cmd = format!("mount {fstype_flag} \"{dev_path}\" \"{mount_str}\"");
-            let res = Dialog::script(&tx, mount_cmd, true).await?;
-            if !res.success {
+            let result = match Dialog::script(&tx, mount_cmd, true, Duration::from_secs(60)).await?
+            {
+                Some(res) => res,
+                None => {
+                    return Err(Error::OperationTimeout.into());
+                }
+            };
+            if !result.success {
                 return Err(Error::Custom(format!(
                     "Failed to mount backup target: {}",
-                    res.stderr
+                    result.stderr
                 ))
                 .into());
             }
@@ -430,7 +495,7 @@ pub async fn handle_backup(tx: Sender<Bytes>, query: ToolQuery<BackupAction>) ->
 
         let (uid, gid) = utils::resolve_target_uid_gid(&mount_path_buf.to_string_lossy());
         let chown_cmd = format!("chown -R {uid}:{gid} \"{}\"", root_folder.to_string_lossy());
-        let _ = Dialog::script(&tx, chown_cmd, true).await;
+        let _ = Dialog::script(&tx, chown_cmd, true, Duration::from_secs(120)).await;
 
         let msg = format!(
             "Backed up {total_files} file(s) from `{}` to `{dest_display}`.",

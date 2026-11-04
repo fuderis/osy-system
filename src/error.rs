@@ -16,4 +16,7 @@ pub enum Error {
 
     #[display(fmt = "This feature is not supported on your OS.")]
     UnsupportedOS,
+
+    #[display(fmt = "Operation was aborted due to a timeout.")]
+    OperationTimeout,
 }
