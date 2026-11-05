@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-/// System agent settings.
+/// Agent configuration.
 #[atoman::config]
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Config {}
