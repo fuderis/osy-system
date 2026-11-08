@@ -4401,9 +4401,9 @@ dependencies = [
 
 [[package]]
 name = "rigging"
-version = "0.5.11"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b145035f9478fcb75eca97ae1769dd5e24b570b78220d42f71807250c0714d1"
+checksum = "30cc506dd8ac1a842440d4b845fcee5a8210a1e7224d24fe690acbffeb582f9e"
 dependencies = [
  "adot-tree-sitter-toml",
  "async-trait",

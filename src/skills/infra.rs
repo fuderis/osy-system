@@ -341,23 +341,23 @@ pub async fn handle_user(tx: Sender<Bytes>, query: ToolQuery<UserAction>) -> Res
                 .as_deref()
                 .ok_or_else(|| Error::Custom("Missing 'username' parameter".into()))?;
 
-            let confirmation = match Dialog::confirm(
+            let confirmation = Dialog::confirm(
                 &tx,
                 format!("Are you sure you want to delete user `{user}` from `{host}`?"),
                 Some(Confirmation::No),
                 Duration::from_secs(120),
             )
-            .await?
-            {
-                Some(res) => res,
+            .await?;
+
+            match confirmation {
+                Some(Confirmation::No) => {
+                    tx.send(Event::Answer("User removal cancelled.".to_string()))?;
+                    return Ok(());
+                }
                 None => {
                     return Err(Error::OperationTimeout.into());
                 }
-            };
-
-            if matches!(confirmation, Confirmation::No) {
-                tx.send(Event::Answer("User removal cancelled.".to_string()))?;
-                return Ok(());
+                _ => {}
             }
 
             tx.send(Event::Thinking(format!(
